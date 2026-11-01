@@ -34,6 +34,13 @@ def _is_loopback(host) -> bool:
 
 
 @pytest.fixture(autouse=True)
+def _isolated_home(monkeypatch, tmp_path_factory):
+    """`~` expands inside a per-test temp dir: no test may create files under the real home directory."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+
+
+@pytest.fixture(autouse=True)
 def _no_ambient_proxy(monkeypatch):
     for name in _PROXY_VARS:
         monkeypatch.delenv(name, raising=False)

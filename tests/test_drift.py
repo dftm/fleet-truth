@@ -72,7 +72,9 @@ def test_no_commit_falls_back_to_version(R):
 
 
 def test_hostile_commit_values_never_reach_git_as_options(R):
-    for bad in ["--output=/tmp/x", "HEAD", "main", "abc", "g" * 40, 123, ["a"], "a" * 41]:
+    for bad in ["--output=/tmp/x", "HEAD", "main", "abc", "g" * 40, 123, ["a"], "a" * 41,
+                "origin/main", "refs/remotes/origin/main", "refs/local/main", "refs/local/main~0", "origin/main^{commit}",
+                "-1", "--all", " --exec=x"]:
         r = verdict(R, {"commit": bad})
         assert r["verdict"] in ("LIVE_UNKNOWN", "NO_COMMIT", "NO_COMMIT_VERSION_DIFF"), bad
         assert r["verdict"] != "IN_SYNC", bad

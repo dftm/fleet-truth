@@ -309,7 +309,7 @@ class Dispatcher:
         err = clean(res.error)
         if not res.ok:
             log.warning("alert channel %s failed: %s", s.name, err)
-        if self.store is not None and msg.kind != "test":
+        if self.store is not None:
             self.store.record_alert(msg.app, msg.check, msg.status, s.name, self.now_fn(), res.ok, err or None)
         return SendResult(res.ok, err)
 

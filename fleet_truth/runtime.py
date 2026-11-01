@@ -78,4 +78,8 @@ def test_alerts(cfg: cfgmod.Config, *, fetch: Callable | None = None,
     """Send one [TEST] message to every configured channel (ignores min_status)."""
     secrets.install_log_scrubber()
     snd = alerts.build_senders(cfg, fetch or net.fetch, get_secret) if senders is None else senders
-    return alerts.Dispatcher(snd, None, alerts.page_url(cfg)).test_all(version.read_version())
+    store = open_store(cfg)  # test sends are recorded, so a repaired channel counts as healthy again
+    try:
+        return alerts.Dispatcher(snd, store, alerts.page_url(cfg)).test_all(version.read_version())
+    finally:
+        store.close()

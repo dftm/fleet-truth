@@ -435,3 +435,16 @@ def test_alert_redirect_is_not_followed(tmp_path, monkeypatch):
         assert not srv.requests and not hop.requests
     finally:
         srv.close(); hop.close()
+
+
+def test_test_alert_result_restores_channel_health_for_the_dead_man(tmp_path, monkeypatch):
+    cfg = dm_cfg(tmp_path, NTFY)
+    o = runtime.run_once(cfg, runner_factory=R_crit, now=1000, fetch=Stub(status=500))
+    assert o.dead_man.action == "withheld"
+    o.store.close()
+    ok = Stub(body=b"{}")
+    res = runtime.test_alerts(cfg, fetch=ok)
+    assert res["ntfy"].ok
+    o2 = runtime.run_once(cfg, runner_factory=R_ok, now=2000, fetch=ok)
+    assert o2.dead_man.action == "pinged"
+    o2.store.close()

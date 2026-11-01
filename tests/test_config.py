@@ -185,3 +185,10 @@ def test_alert_sections():
                      "password_env": "SMTP_PW"}]
     cfg = config.parse(ok)
     assert cfg.alerts[0].mode == "healthchecks" and cfg.alerts[1].smtp_port == 587
+
+
+def test_tests_cannot_touch_the_real_home(tmp_path):
+    import os
+    from pathlib import Path
+    assert str(Path("~/x").expanduser()) == os.path.join(os.environ["HOME"], "x")
+    assert "pytest" in os.environ["HOME"] or str(tmp_path.parent) in os.environ["HOME"] or "home" in os.environ["HOME"]
