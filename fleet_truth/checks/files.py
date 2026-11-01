@@ -50,8 +50,34 @@ def lock_is_held(state_dir: Path) -> bool:
         os.close(fd)
 
 
-def backup_age(cfg: BackupCfg, now: float | None = None) -> CheckResult:
-    """Mirrors backup_lib._check_status verdict for verdict, then adds the running-backup guard."""
+def _bad_epoch(v, now: float) -> str | None:
+    """Reason a status epoch is unusable, else None. Same rules as HEARTBEAT: seconds, finite, not in the future."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return "not a number"
+    if v != v or v in (float("inf"), float("-inf")):
+        return "not finite"
+    if v <= 0:
+        return "not positive"
+    if v >= 1e11:
+        return "looks like milliseconds or a far-future year"
+    if v > now + FUTURE_SLACK_S:
+        return "in the future"
+    return None
+
+
+def running_grace_hours(cfg: BackupCfg, interval_s: float) -> float:
+    """How long a held lock may mask a bad status: `running_grace` (hours) or max(2 x check interval, 6 h)."""
+    return cfg.running_grace_hours if cfg.running_grace_hours is not None else max(2 * interval_s / 3600, 6.0)
+
+
+def backup_age(cfg: BackupCfg, now: float | None = None, *, interval_s: float = 300.0,
+               meta_get=None, meta_set=None) -> CheckResult:
+    """Mirrors backup_lib._check_status verdict for verdict, then adds the bounded running-backup guard.
+
+    A held lock masks NEVER_RAN/FAILED/STALE as `RUNNING` (info) only for `running_grace` hours, counted
+    from the first cycle that saw the lock held (kept through meta_get/meta_set; the lock file's mtime is
+    the fallback without a store). After that the check is crit: a hung backup must not hide a stale one.
+    """
     now = time.time() if now is None else now
     path = Path(cfg.status_file)
     st = _read_status(path)
@@ -69,6 +95,11 @@ def backup_age(cfg: BackupCfg, now: float | None = None) -> CheckResult:
                   f"last ok {_s(st.get('last_ok'))}")
         data = {"stage": _s(st.get("stage")), "timestamp": _s(st.get("timestamp")), "last_ok": _s(st.get("last_ok"))}
     else:
+        if "last_ok_epoch" in st:
+            why = _bad_epoch(st["last_ok_epoch"], now)
+            if why:
+                return CheckResult("crit", "UNREADABLE", f"last_ok_epoch is not a usable timestamp ({why}); "
+                                   "the backup status cannot be trusted")
         last = st.get("last_ok_epoch")
         age_h = (now - last) / 3600 if isinstance(last, (int, float)) and not isinstance(last, bool) else float("inf")
         data = {"age_h": None if age_h == float("inf") else round(age_h, 1), "last_ok": _s(st.get("last_ok"))}
@@ -78,8 +109,34 @@ def backup_age(cfg: BackupCfg, now: float | None = None) -> CheckResult:
                       else "status has no usable last_ok_epoch")
         else:
             detail = f"ok, last success {age_h:.1f}h ago"
-    if verdict in ("NEVER_RAN", "FAILED", "STALE") and lock_is_held(path.parent):
-        return CheckResult("info", "RUNNING", f"a backup run is in progress (would otherwise read: {verdict})", data)
+    key = f"lock_held_since:{path}"
+    held = lock_is_held(path.parent)
+    if not held:
+        if meta_set and meta_get and meta_get(key):
+            meta_set(key, "")
+    elif verdict in ("NEVER_RAN", "FAILED", "STALE"):
+        since = None
+        if meta_get:
+            try:
+                since = float(meta_get(key) or "") or None
+            except ValueError:
+                since = None
+        if since is None:
+            try:
+                since = (path.parent / "lock").stat().st_mtime if not meta_set else now
+            except OSError:
+                since = now
+            if meta_set:
+                meta_set(key, f"{now:.0f}")
+        held_h = max(0.0, (now - since) / 3600)
+        grace = running_grace_hours(cfg, interval_s)
+        data = {**data, "lock_held_h": round(held_h, 1), "would_be": verdict}
+        if held_h > grace:
+            return CheckResult("crit", "LOCK_STUCK",
+                               f"backup lock held for {held_h:.1f} hours (limit {grace:g}); "
+                               f"underlying status would read {verdict}: a hung backup is hiding it", data)
+        return CheckResult("info", "RUNNING", f"a backup run is in progress, lock held {held_h:.1f}h "
+                           f"(would otherwise read: {verdict})", data)
     return CheckResult(status, verdict, detail, data)
 
 

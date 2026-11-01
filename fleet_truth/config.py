@@ -102,6 +102,7 @@ class BackupCfg:
     app_name: str | None = None
     max_age_hours: float = 26.0
     required: bool = False
+    running_grace_hours: float | None = None  # how long a held lock may mask a bad status; None = max(2 x interval, 6 h)
 
 
 @dataclass(frozen=True)
@@ -441,7 +442,7 @@ def _app(raw: Any, path: str, defaults: dict, ctx: _Ctx) -> App | None:
     unp = section("unpushed", UnpushedCfg, {"max_age_hours", "dirty_hours"}) or {}
     tls = section("tls", TlsCfg, {"host", "warn_days", "crit_days", "every_hours"}) or {}
     build = section("build", BuildCfg, {"max_age_days"}) or {}
-    backup_d = section("backup", BackupCfg, {"status_file", "app_name", "max_age_hours", "required"})
+    backup_d = section("backup", BackupCfg, {"status_file", "app_name", "max_age_hours", "required", "running_grace"})
     hb_d = section("heartbeat", HeartbeatCfg, {"file", "field", "max_age_minutes"})
 
     backup = None
@@ -455,7 +456,8 @@ def _app(raw: Any, path: str, defaults: dict, ctx: _Ctx) -> App | None:
             ctx.err(f"{bp}.app_name", "required key is missing")
         if sf and an:
             backup = BackupCfg(_path(sf), an, float(_num(backup_d, "max_age_hours", bp, ctx, 26.0, 0.001)),
-                               _bool(backup_d, "required", bp, ctx))
+                               _bool(backup_d, "required", bp, ctx),
+                               float(_num(backup_d, "running_grace", bp, ctx, 0, 0.001)) if "running_grace" in backup_d else None)
     heartbeat = None
     if d.get("heartbeat") is not None and hb_d is not None:
         hp = f"{path}.heartbeat"

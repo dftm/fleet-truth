@@ -89,7 +89,8 @@ class Runner:
             yield "UNPUSHED", _safe("UNPUSHED", lambda: drift_mod.unpushed_check(
                 spec.mirror_dir, Path(app.repo), app.branch, app.unpushed.max_age_hours, app.unpushed.dirty_hours, now))
         if app.backup:
-            yield "BACKUP_AGE", _safe("BACKUP_AGE", lambda: files_mod.backup_age(app.backup, now))
+            yield "BACKUP_AGE", _safe("BACKUP_AGE", lambda: files_mod.backup_age(
+                app.backup, now, interval_s=cfg.interval_seconds, meta_get=self.meta_get, meta_set=self.meta_set))
         if (app.health and app.health.url.startswith("https://") or app.tls.host) and self._tls_due(app, now):
             yield "TLS_EXPIRY", _safe("TLS_EXPIRY", lambda: http_mod.tls_expiry(app, now, self.cert_fn))
             if self.meta_set:
