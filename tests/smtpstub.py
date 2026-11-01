@@ -1,6 +1,6 @@
 """A tiny SMTP server on 127.0.0.1 for exercising the REAL email code path.
 
-modes: ok | no_starttls | bad_greeting | silent (accepts, never greets) | auth_reject | data_reject
+modes: ok | no_starttls | bad_greeting | silent (accepts, never greets) | slowdrip | auth_reject | data_reject
 """
 from __future__ import annotations
 
@@ -45,6 +45,12 @@ class SMTPStub:
         try:
             if self.mode == "silent":
                 threading.Event().wait(5)
+                return
+            if self.mode == "slowdrip":   # greeting arrives one byte every 0.4 s: never trips a per-operation timeout
+                import time
+                for ch in b"220 stub ESMTP ready and very very slow\r\n" * 20:
+                    c.sendall(bytes([ch]))
+                    time.sleep(0.4)
                 return
             f = c.makefile("rwb", buffering=0)
             send = lambda t: f.write((t + "\r\n").encode())  # noqa: E731

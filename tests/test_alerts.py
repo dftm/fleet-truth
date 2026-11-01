@@ -937,3 +937,50 @@ def test_undelivered_flapping_alert_is_retried_next_cycle_not_6h_later(tmp_path)
     delivered = [g for g in got if g[2]]
     assert failed and delivered and delivered[0][0] == failed[-1][0] + 1, got
     assert len(delivered) == 1
+
+
+# ------------------------------------------------------------------ review 2 R9: alert sending has a time budget
+@pytest.mark.loopback
+def test_slow_smtp_cannot_push_a_run_past_its_alert_budget(tmp_path):
+    cert = make_cert(tmp_path, "mail.test")
+    stub = SMTPStub("slowdrip", cert)
+    try:
+        cfg = config.parse({"apps": [{"name": "a", "health": {"url": "https://a.example.com/"}},
+                                     {"name": "b", "health": {"url": "https://b.example.com/"}}],
+                            "alerts": [{"type": "email", "smtp_host": "mail.test", "smtp_port": stub.port,
+                                        "from": "f@x.org", "to": "t@x.org"}],
+                            "data_dir": str(tmp_path / "d"), "confirm": 1, "alert_budget_seconds": 1})
+        sender = smtp_sender(stub.port, cert, creds=False, timeout=30.0)   # per-operation timeout far above the budget
+        t0 = time.monotonic()
+        o = runtime.run_once(cfg, runner_factory=R_crit, now=1000, fetch=Stub(), senders=[sender])
+        took = time.monotonic() - t0
+        assert took < 4.0, took
+        assert len(o.deliveries) == 2 and all(d.undelivered for d in o.deliveries)
+        rows = [r["error"] for r in o.store.db.execute("SELECT error FROM alerts ORDER BY id")]
+        assert "exceeded the alert time budget" in rows[0] and "budget exhausted" in rows[1]
+        for app in ("a", "b"):   # both rolled back: retried next cycle
+            assert o.store.get_state(app, "HEALTHZ").alerted_status is None
+        o.store.close()
+    finally:
+        stub.close()
+
+
+def test_budget_config_and_dispatcher_skips_remaining_after_exhaustion():
+    base = {"apps": [{"name": "a"}]}
+    assert config.parse(base).alert_budget_seconds == 60.0
+    assert config.parse({**base, "alert_budget_seconds": 5}).alert_budget_seconds == 5.0
+    with pytest.raises(config.ConfigError):
+        config.parse({**base, "alert_budget_seconds": 0})
+
+    class Slow:
+        name, min_status = "slow", "info"
+
+        def send(self, msg):
+            time.sleep(0.6)
+            return alerts.SendResult(True)
+
+    disp = alerts.Dispatcher([Slow()], None, "u", budget_s=1.0)
+    t0 = time.monotonic()
+    out = disp.dispatch([decision(), decision(), decision()])
+    assert time.monotonic() - t0 < 2.0
+    assert [o.delivered for o in out] == [1, 0, 0]

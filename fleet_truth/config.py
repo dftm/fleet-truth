@@ -179,6 +179,7 @@ class Config:
     dead_man: DeadMan = field(default_factory=DeadMan)
     apps: tuple[App, ...] = ()
     flap: FlapCfg = field(default_factory=FlapCfg)
+    alert_budget_seconds: float = 60.0     # total time one cycle may spend sending alerts
     offline_suppress_cycles: int = 2       # max cycles 'monitor offline' may suppress app alerts
     blind_level: str = "crit"           # level of 'monitor cannot judge' alerts, compared with channel min_status
     reference_urls: tuple[str, ...] = ()  # independent public URLs used to tell 'monitor offline' from 'fleet down'
@@ -539,7 +540,7 @@ def parse(data: Any) -> Config:
         raise ConfigError(["<root>: the file must contain a mapping"])
     _scan_literal_secrets(data, "", ctx)
     top = _obj(data, "", ctx, {"interval_seconds", "confirm", "data_dir", "web", "git", "credentials", "alerts",
-                               "dead_man", "defaults", "apps", "reference_urls", "blind_level", "flap", "offline_suppress_cycles"})
+                               "dead_man", "defaults", "apps", "reference_urls", "blind_level", "flap", "offline_suppress_cycles", "alert_budget_seconds"})
     interval = int(_num(top, "interval_seconds", "interval_seconds", ctx, 300, 10, True)) if "interval_seconds" in top else 300
     confirm = int(_num(top, "confirm", "confirm", ctx, 2, 1, True)) if "confirm" in top else 2
     data_dir = _str(top, "data_dir", "data_dir", ctx, "~/.local/share/fleet-truth") or "~/.local/share/fleet-truth"
@@ -577,6 +578,7 @@ def parse(data: Any) -> Config:
         ctx.err("blind_level", "must be warn or crit")
         blind_level = "crit"
     off_cycles = int(_num(top, "offline_suppress_cycles", "offline_suppress_cycles", ctx, 2, 0, True)) if "offline_suppress_cycles" in top else 2
+    budget = float(_num(top, "alert_budget_seconds", "alert_budget_seconds", ctx, 60.0, 1)) if "alert_budget_seconds" in top else 60.0
     refs: list[str] = []
     raw_refs = top.get("reference_urls")
     if raw_refs is not None and not isinstance(raw_refs, list):
@@ -628,7 +630,7 @@ def parse(data: Any) -> Config:
 
     if ctx.errors:
         raise ConfigError(ctx.errors)
-    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), flap, off_cycles, blind_level, tuple(refs))
+    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), flap, budget, off_cycles, blind_level, tuple(refs))
     secrets.register(*cfg.env_names())
     return cfg
 

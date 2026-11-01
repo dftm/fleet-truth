@@ -13,6 +13,7 @@ import logging
 import re
 import smtplib
 import socket
+import threading
 import ssl
 import time
 from dataclasses import dataclass
@@ -348,14 +349,34 @@ class Delivery:
 
 
 class Dispatcher:
-    def __init__(self, senders: list, store: Store | None, url: str, now_fn: Callable[[], float] = time.time):
+    def __init__(self, senders: list, store: Store | None, url: str, now_fn: Callable[[], float] = time.time,
+                 budget_s: float = 60.0):
         self.senders, self.store, self.url, self.now_fn = senders, store, url, now_fn
+        self.budget_s = budget_s
+        self._deadline = time.monotonic() + budget_s
+
+    def _call(self, s, msg: AlertMessage) -> SendResult:
+        """s.send() bounded by what is left of the cycle's alert budget (a slow-drip server cannot stretch it)."""
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            return SendResult(False, "alert time budget exhausted; retried next cycle")
+        box: dict = {}
+
+        def run() -> None:
+            try:
+                box["r"] = s.send(msg)
+            except Exception as e:  # noqa: BLE001
+                box["r"] = SendResult(False, type(e).__name__)
+
+        t = threading.Thread(target=run, daemon=True, name=f"ft-send-{s.name}")
+        t.start()
+        t.join(left)
+        if t.is_alive():
+            return SendResult(False, "send exceeded the alert time budget; retried next cycle")
+        return box["r"]
 
     def _send(self, s, msg: AlertMessage) -> SendResult:
-        try:
-            res = s.send(msg)
-        except Exception as e:  # noqa: BLE001 - a broken sender must not stop the others
-            res = SendResult(False, type(e).__name__)
+        res = self._call(s, msg)  # a broken or slow sender must not stop the others nor the run
         err = clean(res.error)
         if not res.ok and not res.skipped:
             log.warning("alert channel %s failed: %s", s.name, err)
@@ -366,6 +387,7 @@ class Dispatcher:
     def dispatch(self, decisions: list[AlertDecision], cycle_clear: bool = True,
                  clear_apps: set | None = None) -> list[Delivery]:
         out = []
+        self._deadline = time.monotonic() + self.budget_s
         for d in decisions:
             msg = format_message(d, self.url, cycle_clear, clear_apps is None or d.app in clear_apps)
             eligible = [s for s in self.senders if LEVEL_RANK[d.level] >= LEVEL_RANK[s.min_status]]
@@ -376,6 +398,7 @@ class Dispatcher:
 
     def test_all(self, version: str) -> dict[str, SendResult]:
         msg = test_message(self.url, version)
+        self._deadline = time.monotonic() + self.budget_s
         return {s.name: self._send(s, msg) for s in self.senders}  # ignores min_status: tests every channel
 
     def channels_healthy(self) -> bool:
