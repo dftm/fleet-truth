@@ -219,15 +219,16 @@ def test_deleting_the_db_recreates_it(tmp_path):
     cfg = mkcfg(access=False, n=1, tmp=tmp_path / "data")
     f = lambda a, n: iter([("HEALTHZ", OK)])  # noqa: E731
     fac = lambda c, **kw: FakeRunner(f)  # noqa: E731
-    cr, store, _ = runtime.run_once(cfg, runner_factory=fac, now=1000)
-    store.close()
+    out = runtime.run_once(cfg, runner_factory=fac, now=1000, senders=[])
+    out.store.close()
     db = runtime.db_path(cfg)
     assert db.exists()
     for suffix in ("", "-wal", "-shm"):
         p = db.with_name(db.name + suffix)
         if p.exists():
             p.unlink()
-    cr2, store2, _ = runtime.run_once(cfg, runner_factory=fac, now=2000)
+    out2 = runtime.run_once(cfg, runner_factory=fac, now=2000, senders=[])
+    cr2, store2 = out2.cr, out2.store
     assert db.exists() and cr2.results[("app0", "HEALTHZ")].status == "ok"
     assert store2.get_state("app0", "HEALTHZ").consecutive == 1  # history gone, check works
     store2.close()
