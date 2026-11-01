@@ -85,7 +85,9 @@ def _run_apps(cfg: Config, runner, now: float, deadline_s: float, workers: int
     return snapshot, timed_out
 
 
-def correlate(cfg: Config, results: dict, reference: Callable[[], bool | None] | None = None) -> tuple[dict, set]:
+def correlate(cfg: Config, results: dict, reference: Callable[[], bool | None] | None = None,
+              meta_get: Callable[[str], str | None] | None = None,
+              meta_set: Callable[[str, str], None] | None = None) -> tuple[dict, set]:
     """Add monitor-level pseudo results and return (extra results, suppressed (app, check) keys).
 
     When every app's HEALTHZ failed at the network layer, the cause is ambiguous: this machine's network or
@@ -94,6 +96,9 @@ def correlate(cfg: Config, results: dict, reference: Callable[[], bool | None] |
       reference answers  -> FLEET_OUTAGE (crit), per-app alerts still go out;
       reference fails    -> MONITOR_OFFLINE (crit), per-app network alerts suppressed this cycle;
       no reference set   -> ALL_APPS_FAILING (crit), says it cannot tell, suppresses nothing.
+    Suppression is capped: at most `offline_suppress_cycles` cycles, and it ends as soon as a MONITOR_OFFLINE
+    alert was actually delivered (that proves the monitor is online, so the outage is the fleet's): from then on
+    the result is FLEET_OUTAGE and per-app alerts flow.
     """
     extra: dict = {}
     suppressed: set = set()
@@ -101,6 +106,7 @@ def correlate(cfg: Config, results: dict, reference: Callable[[], bool | None] |
     hz = {k: v for k, v in hz.items() if v is not None}
     all_fail = len(hz) >= 2 and all(v.status == "crit" and v.data.get("net_error") in NET_ERRORS for v in hz.values())
     offline = False
+    ref_down = False
     if len(hz) >= 2:
         if not all_fail:
             extra[(MONITOR_APP, NETWORK_CHECK)] = CheckResult("ok", "OK", "network reachable")
@@ -115,14 +121,35 @@ def correlate(cfg: Config, results: dict, reference: Callable[[], bool | None] |
                     "crit", "FLEET_OUTAGE", f"fleet-wide outage (VPS or tunnel): all {n} apps fail from here while the "
                     "reference URL answers. Per-app alerts are not suppressed")
             elif ref is False:
-                offline = True
-                extra[(MONITOR_APP, NETWORK_CHECK)] = CheckResult(
-                    "crit", "MONITOR_OFFLINE", f"monitor network offline: all {n} apps and the reference URL fail from "
-                    "here. App network alerts are suppressed this cycle")
+                ref_down = True
+                streak = 1
+                delivered = False
+                if meta_get:
+                    try:
+                        streak = int(meta_get("offline_streak") or 0) + 1
+                    except ValueError:
+                        streak = 1
+                    delivered = meta_get("offline_alert_delivered") == "1"
+                if meta_set:
+                    meta_set("offline_streak", str(streak))
+                if delivered or streak > cfg.offline_suppress_cycles:
+                    why = ("a monitor-offline alert was delivered, so the monitor is online" if delivered
+                           else f"suppression is capped at {cfg.offline_suppress_cycles} cycles")
+                    extra[(MONITOR_APP, NETWORK_CHECK)] = CheckResult(
+                        "crit", "FLEET_OUTAGE", f"fleet-wide outage (VPS or tunnel): all {n} apps fail and the "
+                        f"reference URL fails too, but {why}. Per-app alerts are not suppressed")
+                else:
+                    offline = True
+                    extra[(MONITOR_APP, NETWORK_CHECK)] = CheckResult(
+                        "crit", "MONITOR_OFFLINE", f"monitor network offline: all {n} apps and the reference URL fail "
+                        "from here. App network alerts are suppressed this cycle (capped)")
             else:
                 extra[(MONITOR_APP, NETWORK_CHECK)] = CheckResult(
                     "crit", "ALL_APPS_FAILING", f"all {n} apps failing simultaneously: VPS/tunnel outage OR monitor "
                     "offline (no reference_urls configured to tell which). Per-app alerts are not suppressed")
+    if meta_set and meta_get and not ref_down and (meta_get("offline_streak") or meta_get("offline_alert_delivered")):
+        meta_set("offline_streak", "0")        # the episode is over: the next one starts a fresh cap
+        meta_set("offline_alert_delivered", "0")
     if offline:
         for a in cfg.apps:
             for c in NETWORK_CHECKS:
@@ -163,7 +190,7 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
                         cr.results[(app.name, name)] = CheckResult(
                             "unknown", "TIMEOUT_CYCLE", f"check did not finish within the {deadline:.0f}s cycle deadline")
         ref_fn = (lambda: runner.reference_ok(now)) if hasattr(runner, "reference_ok") else None
-        extra, suppressed = correlate(cfg, cr.results, ref_fn)
+        extra, suppressed = correlate(cfg, cr.results, ref_fn, store.meta_get, store.meta_set)
         for key, res in extra.items():
             cr.results[key] = res
         for (app, check), res in cr.results.items():

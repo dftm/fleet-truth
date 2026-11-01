@@ -46,12 +46,15 @@ class AlertMessage:
     consecutive: int
     text: str
     page_url: str
+    cycle_clear: bool = True   # the whole cycle has no crit/unknown check
+    app_clear: bool = True     # this app has no crit/unknown check
 
 
 @dataclass(frozen=True)
 class SendResult:
     ok: bool
     error: str = ""
+    skipped: bool = False   # deliberately sent nothing; never counts as delivered
 
 
 class Sender(Protocol):
@@ -72,7 +75,7 @@ def page_url(cfg: Config) -> str:
     return f"http://{host}:{cfg.web.port}/"
 
 
-def format_message(d: AlertDecision, url: str) -> AlertMessage:
+def format_message(d: AlertDecision, url: str, cycle_clear: bool = True, app_clear: bool = True) -> AlertMessage:
     hhmm = time.strftime("%H:%M", time.localtime(d.since))
     n = f"{d.consecutive} check{'s' if d.consecutive != 1 else ''}"
     if d.kind == "recovered":
@@ -100,7 +103,7 @@ def format_message(d: AlertDecision, url: str) -> AlertMessage:
         body = body[: max(room - 1, 0)] + "…"
     text = clean(f"{head}: {body}{tail}" if body else f"{head}{tail}")
     return AlertMessage(d.kind, d.app, d.check, d.status, d.level, d.verdict, clean(d.detail)[:300], d.since,
-                        d.consecutive, text[:MAX_TEXT], url)
+                        d.consecutive, text[:MAX_TEXT], url, cycle_clear, app_clear)
 
 
 def test_message(url: str, version: str) -> AlertMessage:
@@ -174,20 +177,31 @@ class NtfySender(_Base):
 
 
 class WebhookSender(_Base):
+    def _url_for(self, msg: AlertMessage) -> tuple[str | None, str | None, bool]:
+        """(url, missing-env note, per_app)."""
+        per_app = dict(self.cfg.app_url_envs).get(msg.app)
+        name = per_app or self.cfg.url_env
+        url = self.get(name) if name else None
+        return url, _missing((name, url)), bool(per_app)
+
     def send(self, msg: AlertMessage) -> SendResult:
-        url = self.get(self.cfg.url_env) if self.cfg.url_env else None
-        miss = _missing((self.cfg.url_env, url))
+        url, miss, per_app = self._url_for(msg)
         if miss:
             return SendResult(False, miss)
         url = url.rstrip("/")
         try:
             if self.cfg.mode == "healthchecks":
-                if msg.kind == "recovered" or msg.kind == "test":
+                # every message is a real call; only a 2xx counts. The "up" ping is sent only when nothing it
+                # could contradict is still down (a shared base URL must not turn green because ONE app recovered)
+                if msg.kind in ("recovered", "test"):
+                    clear = msg.app_clear if per_app else msg.cycle_clear
+                    if msg.kind == "recovered" and not clear:
+                        return SendResult(False, "success ping withheld: other checks are still crit or unknown", skipped=True)
                     target = url
-                elif msg.level == "crit" and msg.kind in ("alert", "reminder"):
-                    target = url + "/fail"
+                elif msg.level == "crit":
+                    target = url + "/fail"       # crit alert, reminder, blind, flapping, reset
                 else:
-                    return SendResult(True, "")  # no mapping for warn/blind in healthchecks mode (see wiki)
+                    target = url + "/log"        # warn-level: informational, does not flip the check
                 r = self._post(target, {"Content-Type": "text/plain; charset=utf-8"}, msg.text.encode("utf-8"))
             else:
                 body = {"app": msg.app, "check": msg.check, "status": msg.status, "verdict": msg.verdict,
@@ -320,6 +334,7 @@ class Delivery:
     eligible: int
     delivered: int
     configured: int = 0
+    skipped: int = 0   # eligible channels that deliberately sent nothing (never counted as delivered)
 
     @property
     def undelivered(self) -> bool:
@@ -327,6 +342,8 @@ class Delivery:
         failure; having no channel at all, or a monitor-blind alert nobody can receive, is."""
         if self.delivered > 0:
             return False
+        if self.skipped and self.skipped == self.eligible:
+            return False  # every eligible channel chose to say nothing (e.g. a success ping withheld on purpose)
         return self.eligible > 0 or self.configured == 0 or self.decision.kind == "blind"
 
 
@@ -340,19 +357,21 @@ class Dispatcher:
         except Exception as e:  # noqa: BLE001 - a broken sender must not stop the others
             res = SendResult(False, type(e).__name__)
         err = clean(res.error)
-        if not res.ok:
+        if not res.ok and not res.skipped:
             log.warning("alert channel %s failed: %s", s.name, err)
         if self.store is not None:
             self.store.record_alert(msg.app, msg.check, msg.status, s.name, self.now_fn(), res.ok, err or None)
-        return SendResult(res.ok, err)
+        return SendResult(res.ok, err, res.skipped)
 
-    def dispatch(self, decisions: list[AlertDecision]) -> list[Delivery]:
+    def dispatch(self, decisions: list[AlertDecision], cycle_clear: bool = True,
+                 clear_apps: set | None = None) -> list[Delivery]:
         out = []
         for d in decisions:
-            msg = format_message(d, self.url)
+            msg = format_message(d, self.url, cycle_clear, clear_apps is None or d.app in clear_apps)
             eligible = [s for s in self.senders if LEVEL_RANK[d.level] >= LEVEL_RANK[s.min_status]]
-            ok = sum(1 for s in eligible if self._send(s, msg).ok)
-            out.append(Delivery(d, len(eligible), ok, len(self.senders)))
+            results = [self._send(s, msg) for s in eligible]
+            ok = sum(1 for r in results if r.ok and not r.skipped)
+            out.append(Delivery(d, len(eligible), ok, len(self.senders), sum(1 for r in results if r.skipped)))
         return out
 
     def test_all(self, version: str) -> dict[str, SendResult]:

@@ -62,6 +62,7 @@ class AlertCfg:
     bot_token_env: str | None = None  # telegram
     chat_id_env: str | None = None    # telegram
     url_env: str | None = None        # webhook target (may embed a secret)
+    app_url_envs: tuple = ()          # webhook healthchecks mode: ((app name, env var NAME), ...) per-app check URLs
     mode: str = "json"                # webhook: json | healthchecks
     smtp_host: str | None = None      # email
     smtp_port: int = 587
@@ -178,6 +179,7 @@ class Config:
     dead_man: DeadMan = field(default_factory=DeadMan)
     apps: tuple[App, ...] = ()
     flap: FlapCfg = field(default_factory=FlapCfg)
+    offline_suppress_cycles: int = 2       # max cycles 'monitor offline' may suppress app alerts
     blind_level: str = "crit"           # level of 'monitor cannot judge' alerts, compared with channel min_status
     reference_urls: tuple[str, ...] = ()  # independent public URLs used to tell 'monitor offline' from 'fleet down'
 
@@ -194,7 +196,7 @@ class Config:
             add(n)
         for a in self.alerts:
             for n in (a.topic_env, a.token_env, a.bot_token_env, a.chat_id_env, a.url_env,
-                      a.username_env, a.password_env):
+                      a.username_env, a.password_env, *[e for _, e in a.app_url_envs]):
                 add(n)
         add(self.dead_man.url_env)
         return out
@@ -354,6 +356,12 @@ def _tls_host(d: dict, path: str, ctx: _Ctx) -> str | None:
     return h
 
 
+def _site(host: str) -> str:
+    """Last two labels (a stand-in for the registrable domain; no public-suffix list offline)."""
+    parts = host.rstrip(".").split(".")
+    return ".".join(parts[-2:])
+
+
 def _alert(raw: Any, path: str, ctx: _Ctx) -> AlertCfg | None:
     if not isinstance(raw, dict):
         ctx.err(path, "must be a mapping")
@@ -366,7 +374,7 @@ def _alert(raw: Any, path: str, ctx: _Ctx) -> AlertCfg | None:
         "telegram": {"bot_token_env", "chat_id_env"},
         "ntfy": {"url", "topic_env", "token_env"},
         "email": {"smtp_host", "smtp_port", "username_env", "password_env", "from", "to"},
-        "webhook": {"url_env", "mode"},
+        "webhook": {"url_env", "mode", "app_url_envs"},
     }
     d = _obj(raw, path, ctx, {"type", "min_status"} | per_type[typ])
     ms = _str(d, "min_status", path, ctx, "warn")
@@ -391,6 +399,20 @@ def _alert(raw: Any, path: str, ctx: _Ctx) -> AlertCfg | None:
             ctx.err(f"{path}.mode", "must be json or healthchecks")
             mode = "json"
         kw["mode"] = mode
+        raw_map = d.get("app_url_envs")
+        pairs = []
+        if raw_map is not None:
+            if not isinstance(raw_map, dict):
+                ctx.err(f"{path}.app_url_envs", "must be a mapping of app name -> env var NAME")
+            else:
+                for an, en in raw_map.items():
+                    if not isinstance(an, str) or not NAME_RE.match(an):
+                        ctx.err(f"{path}.app_url_envs.{an}", "app name must match ^[a-z0-9][a-z0-9-]{0,40}$")
+                    elif not isinstance(en, str) or not secrets.ENV_NAME.match(en):
+                        ctx.err(f"{path}.app_url_envs.{an}", "must be an environment variable NAME, not a value")
+                    else:
+                        pairs.append((an, en))
+        kw["app_url_envs"] = tuple(sorted(pairs))
         if kw.get("url_env") is None:
             ctx.err(f"{path}.url_env", "required for webhook (the URL may embed a secret, so it lives in an env var)")
     elif typ == "email":
@@ -517,7 +539,7 @@ def parse(data: Any) -> Config:
         raise ConfigError(["<root>: the file must contain a mapping"])
     _scan_literal_secrets(data, "", ctx)
     top = _obj(data, "", ctx, {"interval_seconds", "confirm", "data_dir", "web", "git", "credentials", "alerts",
-                               "dead_man", "defaults", "apps", "reference_urls", "blind_level", "flap"})
+                               "dead_man", "defaults", "apps", "reference_urls", "blind_level", "flap", "offline_suppress_cycles"})
     interval = int(_num(top, "interval_seconds", "interval_seconds", ctx, 300, 10, True)) if "interval_seconds" in top else 300
     confirm = int(_num(top, "confirm", "confirm", ctx, 2, 1, True)) if "confirm" in top else 2
     data_dir = _str(top, "data_dir", "data_dir", ctx, "~/.local/share/fleet-truth") or "~/.local/share/fleet-truth"
@@ -554,6 +576,7 @@ def parse(data: Any) -> Config:
     if blind_level not in ("warn", "crit"):
         ctx.err("blind_level", "must be warn or crit")
         blind_level = "crit"
+    off_cycles = int(_num(top, "offline_suppress_cycles", "offline_suppress_cycles", ctx, 2, 0, True)) if "offline_suppress_cycles" in top else 2
     refs: list[str] = []
     raw_refs = top.get("reference_urls")
     if raw_refs is not None and not isinstance(raw_refs, list):
@@ -585,6 +608,17 @@ def parse(data: Any) -> Config:
             seen.add(a.name)
             apps.append(a)
 
+    app_hosts = set()
+    for a in apps:
+        for u in ((a.health.url if a.health else None), (a.version.url if a.version else None),
+                  ("https://" + a.tls.host if a.tls.host else None)):
+            if u:
+                app_hosts.add((urlsplit(u).hostname or "").lower())
+    for i, u in enumerate(refs):
+        rh = (urlsplit(u).hostname or "").lower()
+        if any(_site(rh) == _site(h) for h in app_hosts):
+            ctx.err(f"reference_urls[{i}]", "must be independent of the fleet: this host shares its domain with a "
+                                           "monitored app, so it fails whenever the fleet does")
     for a in apps:
         if a.version and a.version.auth == "access":
             if not (creds.access_client_id_env and creds.access_client_secret_env):
@@ -594,7 +628,7 @@ def parse(data: Any) -> Config:
 
     if ctx.errors:
         raise ConfigError(ctx.errors)
-    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), flap, blind_level, tuple(refs))
+    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), flap, off_cycles, blind_level, tuple(refs))
     secrets.register(*cfg.env_names())
     return cfg
 

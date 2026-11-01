@@ -152,7 +152,18 @@ def _run_locked(cfg, store, reset_note, runner_factory, now, deadline_s, fetch, 
     if reset_note:  # also the conservative channel re-test: this send is recorded, so a dead channel shows as failing
         decisions.append(AlertDecision("reset", "_monitor", "STATE", "warn", "crit", "STATE_RESET", reset_note,
                                        int(cr.started_at), 1))
-    deliveries = disp.dispatch(decisions)
+    bad = {"crit", "unknown"}
+    bad_apps = {a for (a, _c), r in cr.results.items() if r.status in bad}
+    for st in store.all_states():  # an un-recovered crit/blind alert from an earlier cycle also keeps things not-clear
+        if st.alerted_status in ("crit", "unknown"):
+            bad_apps.add(st.app)
+    cycle_clear = not bad_apps
+    clear_apps = {a.name for a in cfg.apps} - bad_apps
+    deliveries = disp.dispatch(decisions, cycle_clear, clear_apps)
+    for d in deliveries:
+        if (d.delivered and d.decision.app == cyc.MONITOR_APP and d.decision.check == cyc.NETWORK_CHECK
+                and d.decision.verdict == "MONITOR_OFFLINE"):
+            store.meta_set("offline_alert_delivered", "1")  # it got out, so the monitor is online: stop suppressing
     for d in deliveries:
         if d.undelivered and d.decision.kind != "reset":  # nobody heard it: retry next cycle
             cyc.rollback_alert_state(store, d.decision)

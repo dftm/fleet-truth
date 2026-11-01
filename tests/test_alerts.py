@@ -149,9 +149,10 @@ def test_webhook_json_and_healthchecks_modes():
     (s,) = alerts.build_senders(hc, stub)
     s.send(alerts.format_message(decision(), "u"))
     s.send(alerts.format_message(decision(kind="recovered", level="crit"), "u"))
-    s.send(alerts.format_message(decision(level="warn"), "u"))  # no mapping: nothing sent
+    s.send(alerts.format_message(decision(level="warn"), "u"))  # warn: informational /log, a real call
     assert [c["url"] for c in stub.calls] == ["https://hc.example.com/ping/SEKRIT-uuid/fail",
-                                              "https://hc.example.com/ping/SEKRIT-uuid"]
+                                              "https://hc.example.com/ping/SEKRIT-uuid",
+                                              "https://hc.example.com/ping/SEKRIT-uuid/log"]
 
 
 class FakeSMTP:
@@ -723,3 +724,175 @@ def test_crit_unknown_alternation_for_24h_reaches_a_crit_only_channel(tmp_path):
         o.store.close()
     tg = [c for c in stub.calls if "telegram" in c["url"]]
     assert len(tg) >= 4 and json.loads(tg[0]["body"])["text"].startswith("[CRIT] a HEALTHZ")
+
+
+# ------------------------------------------------------------------ review 2 R2: healthchecks mode never no-ops
+@pytest.mark.loopback
+def test_healthchecks_mode_every_kind_is_a_real_http_call_and_counts_only_on_2xx(tmp_path, monkeypatch):
+    srv, fetch = https_fixture(tmp_path, "hc.test", lambda r: (200, {}, b"OK"))
+    try:
+        monkeypatch.setenv("HOOK_URL", f"https://hc.test:{srv.port}/ping/base")
+        cfg = cfg_with({"type": "webhook", "url_env": "HOOK_URL", "mode": "healthchecks", "min_status": "warn"})
+        disp = alerts.Dispatcher(alerts.build_senders(cfg, fetch), None, "u")
+        cases = [("alert", "crit"), ("reminder", "crit"), ("blind", "crit"), ("flapping", "crit"), ("reset", "crit"),
+                 ("alert", "warn"), ("blind", "warn"), ("flapping", "warn")]
+        decs = [decision(kind=k, level=lv) for k, lv in cases]
+        out = disp.dispatch(decs)
+        assert [o.delivered for o in out] == [1] * 8 and not any(o.undelivered for o in out)
+        assert [r.path for r in srv.requests] == ["/ping/base/fail"] * 5 + ["/ping/base/log"] * 3
+        assert all(r.method == "POST" and r.body.startswith(b"[") for r in srv.requests)
+    finally:
+        srv.close()
+    # non-2xx is a failure, never a delivery
+    srv, fetch = https_fixture(tmp_path / "b", "hc.test", lambda r: (500, {}, b"no"))
+    try:
+        monkeypatch.setenv("HOOK_URL", f"https://hc.test:{srv.port}/ping/base")
+        disp = alerts.Dispatcher(alerts.build_senders(cfg, fetch), None, "u")
+        out = disp.dispatch([decision(kind="blind", level="crit")])
+        assert out[0].delivered == 0 and out[0].undelivered
+    finally:
+        srv.close()
+
+
+@pytest.mark.loopback
+def test_one_app_recovering_does_not_ping_success_on_the_shared_url_while_another_is_down(tmp_path, monkeypatch):
+    srv, fetch = https_fixture(tmp_path, "hc.test", lambda r: (200, {}, b"OK"))
+    try:
+        monkeypatch.setenv("HOOK_URL", f"https://hc.test:{srv.port}/ping/base")
+        cfg = cfg_with({"type": "webhook", "url_env": "HOOK_URL", "mode": "healthchecks", "min_status": "warn"})
+        disp = alerts.Dispatcher(alerts.build_senders(cfg, fetch), None, "u")
+        rec = decision(kind="recovered", level="crit", app="a")
+        out = disp.dispatch([rec], cycle_clear=False, clear_apps={"a"})
+        assert srv.requests == [] and out[0].delivered == 0 and out[0].skipped == 1
+        assert not out[0].undelivered, "a deliberate withhold is neither a delivery nor a failure"
+        disp.dispatch([rec], cycle_clear=True, clear_apps={"a", "b"})
+        assert [r.path for r in srv.requests] == ["/ping/base"]
+    finally:
+        srv.close()
+
+
+@pytest.mark.loopback
+def test_per_app_healthchecks_urls(tmp_path, monkeypatch):
+    srv, fetch = https_fixture(tmp_path, "hc.test", lambda r: (200, {}, b"OK"))
+    try:
+        monkeypatch.setenv("HOOK_URL", f"https://hc.test:{srv.port}/ping/base")
+        monkeypatch.setenv("HC_JOBS", f"https://hc.test:{srv.port}/ping/jobs-uuid")
+        cfg = cfg_with({"type": "webhook", "url_env": "HOOK_URL", "mode": "healthchecks", "min_status": "warn",
+                        "app_url_envs": {"jobs": "HC_JOBS"}})
+        disp = alerts.Dispatcher(alerts.build_senders(cfg, fetch), None, "u")
+        disp.dispatch([decision(app="jobs"), decision(app="other"), decision(kind="recovered", level="crit", app="jobs")],
+                      cycle_clear=False, clear_apps={"jobs"})
+        assert [r.path for r in srv.requests] == ["/ping/jobs-uuid/fail", "/ping/base/fail", "/ping/jobs-uuid"]
+    finally:
+        srv.close()
+    base = {"apps": [{"name": "a"}]}
+    for bad in ({"jobs": "lowercase"}, {"Bad Name": "HC"}, "x"):
+        with pytest.raises(config.ConfigError):
+            config.parse({**base, "alerts": [{"type": "webhook", "url_env": "H", "app_url_envs": bad}]})
+    monkeypatch.delenv("HC_JOBS")
+    r = alerts.build_senders(cfg, Stub())[0].send(alerts.format_message(decision(app="jobs"), "u"))
+    assert not r.ok and "HC_JOBS" in r.error
+
+
+@pytest.mark.loopback
+def test_runtime_computes_clear_flags_from_the_whole_cycle(tmp_path, monkeypatch):
+    srv, fetch = https_fixture(tmp_path, "hc.test", lambda r: (200, {}, b"OK"))
+    try:
+        monkeypatch.setenv("HOOK_URL", f"https://hc.test:{srv.port}/ping/base")
+        cfg = config.parse({"apps": [{"name": "a", "health": {"url": "https://a.example.com/"}},
+                                     {"name": "b", "health": {"url": "https://b.example.com/"}}],
+                            "alerts": [{"type": "webhook", "url_env": "HOOK_URL", "mode": "healthchecks"}],
+                            "data_dir": str(tmp_path / "d"), "confirm": 1})
+        phase = {"a": "crit", "b": "crit"}
+
+        class R:
+            def __init__(self, *x, **k): pass
+            def run_app(self, app, now):
+                yield "HEALTHZ", CheckResult(phase[app.name], "V", "d")
+
+        runtime.run_once(cfg, runner_factory=R, now=1000, fetch=fetch, senders=None).store.close()
+        phase["a"] = "ok"
+        srv.requests.clear()
+        runtime.run_once(cfg, runner_factory=R, now=1300, fetch=fetch).store.close()
+        assert "/ping/base" not in [r.path for r in srv.requests], "b is still crit: the shared URL must stay red"
+        phase["b"] = "ok"
+        runtime.run_once(cfg, runner_factory=R, now=1600, fetch=fetch).store.close()
+        assert [r.path for r in srv.requests if r.path == "/ping/base"] == ["/ping/base"]
+    finally:
+        srv.close()
+
+
+# ------------------------------------------------------------------ review 2 R3: suppression is capped and self-correcting
+class R_fleet_down:
+    ref = False
+
+    def __init__(self, *a, **k): pass
+    def reference_ok(self, now):
+        return type(self).ref
+    def run_app(self, app, now):
+        yield "HEALTHZ", CheckResult("crit", "DOWN", "cannot connect", {"net_error": "CONNECT"})
+
+
+def off_cfg(tmp_path, **kw):
+    d = {"apps": [{"name": f"a{i}", "health": {"url": f"https://a{i}.example.com/healthz"}} for i in range(3)],
+         "alerts": [NTFY], "data_dir": str(tmp_path), "confirm": 2, "reference_urls": ["https://reference.example.org/"]}
+    d.update(kw)
+    return config.parse(d)
+
+
+def test_reference_down_for_a_day_stops_suppressing_after_the_monitor_alert_is_delivered(tmp_path):
+    cfg = off_cfg(tmp_path)
+    R_fleet_down.ref = False
+    stub = Stub(body=b"{}")
+    per_app, mon = [], []
+    for i in range(288):
+        o = runtime.run_once(cfg, runner_factory=R_fleet_down, now=1_000_000 + i * 300, fetch=stub)
+        for d in o.deliveries:
+            (mon if d.decision.app == "_monitor" else per_app).append((i, d.decision.app, d.decision.kind, d.delivered))
+        o.store.close()
+    assert mon[0][0] == 1 and mon[0][3] == 1, "the monitor-offline alert is sent on the first confirmed cycle"
+    assert sorted({a for _, a, _, _ in per_app if _ == _}) == ["a0", "a1", "a2"], "per-app alerts must come out"
+    assert min(i for i, *_ in per_app) == 2, "suppressed for exactly the cycle(s) before delivery was proven"
+    st = runtime.Store(runtime.db_path(cfg)).get_state("_monitor", "NETWORK")
+    assert st.verdict == "FLEET_OUTAGE" and st.status == "crit"
+
+
+def test_undelivered_monitor_offline_alert_cannot_suppress_forever(tmp_path):
+    cfg = off_cfg(tmp_path, offline_suppress_cycles=2)
+    R_fleet_down.ref = False
+    dead = Stub(status=500)
+    seen = []
+    for i in range(6):
+        o = runtime.run_once(cfg, runner_factory=R_fleet_down, now=2_000_000 + i * 300, fetch=dead)
+        seen.append(sorted({d.decision.app for d in o.deliveries}))
+        o.store.close()
+    assert seen[1] == ["_monitor"] and "a0" not in sum(seen[:2], [])   # capped at 2 cycles ...
+    assert any("a0" in s for s in seen[2:]), "... then per-app alerts flow even though nothing was delivered"
+
+
+def test_offline_cap_restarts_after_the_network_comes_back(tmp_path):
+    cfg = off_cfg(tmp_path)
+    stub = Stub(body=b"{}")
+    for i, (ref, ok) in enumerate([(False, False)] * 3 + [(True, True)] * 2 + [(False, False)] * 2):
+        R_fleet_down.ref = ref
+        cls = R_ok if ok else R_fleet_down
+        o = runtime.run_once(cfg, runner_factory=cls, now=3_000_000 + i * 300, fetch=stub)
+        streak = o.store.meta_get("offline_streak")
+        o.store.close()
+    assert streak == "2"          # fresh cap in the second episode
+
+
+def test_reference_urls_must_be_independent_of_the_fleet():
+    base = {"apps": [{"name": "a", "health": {"url": "https://jobs.dftm.cloud/healthz"},
+                      "version": {"url": "https://api.dftm.cloud/v"}}]}
+    ok = config.parse({**base, "reference_urls": ["https://example.org/"]})
+    assert ok.reference_urls
+    for bad in ("https://jobs.dftm.cloud/", "https://status.dftm.cloud/", "https://dftm.cloud/", "https://API.DFTM.CLOUD./x"):
+        with pytest.raises(config.ConfigError) as e:
+            config.parse({**base, "reference_urls": [bad]})
+        assert "independent of the fleet" in e.value.errors[0], bad
+    with pytest.raises(config.ConfigError):
+        config.parse({"apps": [{"name": "a", "tls": {"host": "x.dftm.cloud:8443"}}], "reference_urls": ["https://y.dftm.cloud/"]})
+    assert config.parse({**base, "offline_suppress_cycles": 0}).offline_suppress_cycles == 0
+    with pytest.raises(config.ConfigError):
+        config.parse({**base, "offline_suppress_cycles": -1})
