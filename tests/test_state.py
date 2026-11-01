@@ -122,3 +122,14 @@ def test_decision_carries_prior_alert_fields_for_rollback():
     for i, s in enumerate(["crit", "crit"]):
         row, d = advance(row, "a", "c", CheckResult(s, "V", "d"), i * STEP, 2)
     assert d.prev_alerted_status is None and row.alerted_status == "crit"
+
+
+def test_blind_decision_level_defaults_to_crit_and_is_configurable():
+    for lvl, expect in ((None, "crit"), ("warn", "warn")):
+        row = None
+        for i in range(8):
+            kw = {} if lvl is None else {"blind_level": lvl}
+            row, d = advance(row, "a", "c", CheckResult("unknown", "ERROR", "x"), i * STEP, 2, **kw)
+            if d:
+                assert d.kind == "blind" and d.level == expect
+        assert row.alerted_status == "unknown"

@@ -68,8 +68,10 @@ def run_once(cfg: cfgmod.Config, *, runner_factory: Callable | None = None, now:
     for d in deliveries:
         if d.undelivered:  # nobody heard it: retry next cycle
             cyc.rollback_alert_state(store, d.decision)
-    dm = alerts.dead_man_ping(cfg, cycle_ok=True, error_class=None, channels_healthy=disp.channels_healthy(),
-                              fetch=fetch_fn, get_secret=get_secret, store=store)
+    lost = any(d.undelivered for d in deliveries)
+    # an alert nobody received means the monitor cannot do its job: say so through the dead-man, never "all good"
+    dm = alerts.dead_man_ping(cfg, cycle_ok=not lost, error_class="AlertUndelivered" if lost else None,
+                              channels_healthy=disp.channels_healthy(), fetch=fetch_fn, get_secret=get_secret, store=store)
     return Outcome(cr, store, runner, deliveries, dm)
 
 

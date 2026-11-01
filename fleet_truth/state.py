@@ -34,8 +34,8 @@ class AlertDecision:
     prev_last_alert_at: int | None = None
 
 
-def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: float, confirm: int
-            ) -> tuple[StateRow, AlertDecision | None]:
+def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: float, confirm: int,
+            blind_level: str = "crit") -> tuple[StateRow, AlertDecision | None]:
     now_i = int(now)
     same = prev is not None and prev.status == r.status
     since = prev.since if same else now_i
@@ -59,7 +59,7 @@ def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: fl
                 last_at = now_i
     elif r.status == "unknown":
         if now_i - since >= BLIND_AFTER_S and alerted != "unknown":
-            decision = mk("blind", "warn")
+            decision = mk("blind", blind_level)
             alerted, last_at = "unknown", now_i
     else:  # healthy
         if alerted is not None:

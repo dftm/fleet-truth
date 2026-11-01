@@ -313,10 +313,15 @@ class Delivery:
     decision: AlertDecision
     eligible: int
     delivered: int
+    configured: int = 0
 
     @property
     def undelivered(self) -> bool:
-        return self.eligible > 0 and self.delivered == 0
+        """No channel accepted it. A severity filtered out on purpose (warn on a crit-only channel) is not a
+        failure; having no channel at all, or a monitor-blind alert nobody can receive, is."""
+        if self.delivered > 0:
+            return False
+        return self.eligible > 0 or self.configured == 0 or self.decision.kind == "blind"
 
 
 class Dispatcher:
@@ -341,7 +346,7 @@ class Dispatcher:
             msg = format_message(d, self.url)
             eligible = [s for s in self.senders if LEVEL_RANK[d.level] >= LEVEL_RANK[s.min_status]]
             ok = sum(1 for s in eligible if self._send(s, msg).ok)
-            out.append(Delivery(d, len(eligible), ok))
+            out.append(Delivery(d, len(eligible), ok, len(self.senders)))
         return out
 
     def test_all(self, version: str) -> dict[str, SendResult]:

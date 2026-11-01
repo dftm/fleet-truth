@@ -168,7 +168,7 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
         for (app, check), res in cr.results.items():
             store.add_result(run_id, app, check, res, now)
             prev = store.get_state(app, check)
-            row, decision = advance(prev, app, check, res, now, cfg.confirm)
+            row, decision = advance(prev, app, check, res, now, cfg.confirm, cfg.blind_level)
             if (app, check) in suppressed and decision is not None:
                 row = dataclasses.replace(row, alerted_status=prev.alerted_status if prev else None,
                                           last_alert_at=prev.last_alert_at if prev else None)

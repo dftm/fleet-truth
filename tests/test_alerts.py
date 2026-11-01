@@ -291,12 +291,12 @@ def test_all_channels_failing_withholds_the_dead_man_ping(tmp_path):
     cfg = dm_cfg(tmp_path, NTFY, TG)
 
     def fetch(url, **kw):
-        if "hc.example.com" in url:
-            raise AssertionError("dead-man must not be pinged")
-        return net.Response(500, {}, b"", "1.1.1.1", None, 1)
+        if "hc.example.com" in url and not url.endswith("/fail"):
+            raise AssertionError("the OK ping must not be sent")
+        return net.Response(500 if "hc.example.com" not in url else 200, {}, b"", "1.1.1.1", None, 1)
 
     o = runtime.run_once(cfg, runner_factory=R_crit, now=1000, fetch=fetch)
-    assert o.dead_man.action == "withheld"
+    assert o.dead_man.action == "fail_pinged"  # nobody heard the alert: /fail, never the OK ping
     assert all(d.undelivered for d in o.deliveries)
     o.store.close()
 
@@ -440,7 +440,10 @@ def test_alert_redirect_is_not_followed(tmp_path, monkeypatch):
 def test_test_alert_result_restores_channel_health_for_the_dead_man(tmp_path, monkeypatch):
     cfg = dm_cfg(tmp_path, NTFY)
     o = runtime.run_once(cfg, runner_factory=R_crit, now=1000, fetch=Stub(status=500))
-    assert o.dead_man.action == "withheld"
+    assert o.deliveries and o.deliveries[0].undelivered
+    o.store.close()
+    o = runtime.run_once(cfg, runner_factory=R_ok, now=1500, fetch=Stub(status=500))
+    assert o.dead_man.action == "withheld"  # clean cycle, but the only channel's last send failed
     o.store.close()
     ok = Stub(body=b"{}")
     res = runtime.test_alerts(cfg, fetch=ok)
@@ -620,3 +623,62 @@ def test_real_webhook_json_and_healthchecks_paths(tmp_path, monkeypatch):
         assert s.send(alerts.format_message(decision(), "u")).error == "HTTP 500 from webhook"
     finally:
         srv.close()
+
+
+# ------------------------------------------------------------------ review F5: blind alerts must reach somebody
+class R_unknown:
+    def __init__(self, *a, **k): pass
+    def run_app(self, app, now):
+        yield "HEALTHZ", CheckResult("unknown", "BLOCKED_TARGET", "x")
+
+
+def test_blind_alert_is_crit_eligible_by_default_and_reaches_a_crit_only_channel(tmp_path):
+    cfg = dm_cfg(tmp_path, TG)      # crit-only channel
+    stub = Stub()
+    o1 = runtime.run_once(cfg, runner_factory=R_unknown, now=1000, fetch=stub)
+    o1.store.close()
+    o2 = runtime.run_once(cfg, runner_factory=R_unknown, now=1000 + 31 * 60, fetch=stub)
+    assert [d.decision.kind for d in o2.deliveries] == ["blind"] and o2.deliveries[0].decision.level == "crit"
+    assert not o2.deliveries[0].undelivered and any("telegram" in c["url"] for c in stub.calls)
+    assert o2.dead_man.action == "pinged"
+    o2.store.close()
+
+
+def test_blind_alert_nobody_can_receive_withholds_ok_ping_and_sends_fail(tmp_path):
+    cfg = config.parse({"apps": [{"name": "a", "health": {"url": "https://a.example.com/healthz"}}], "alerts": [TG],
+                        "dead_man": {"url_env": "DM_URL"}, "data_dir": str(tmp_path), "blind_level": "warn"})
+    stub = Stub()
+    runtime.run_once(cfg, runner_factory=R_unknown, now=1000, fetch=stub).store.close()
+    o = runtime.run_once(cfg, runner_factory=R_unknown, now=1000 + 31 * 60, fetch=stub)
+    assert o.deliveries[0].undelivered and o.dead_man.action == "fail_pinged"
+    assert stub.calls[-1]["url"].endswith("/fail") and not [c for c in stub.calls if "telegram" in c["url"]]
+    o.store.close()
+
+
+def test_decision_with_no_channels_configured_is_undelivered_and_fails_the_ping(tmp_path):
+    cfg = dm_cfg(tmp_path)
+    stub = Stub()
+    o = runtime.run_once(cfg, runner_factory=R_crit, now=1000, fetch=stub)
+    assert o.deliveries[0].undelivered and o.dead_man.action == "fail_pinged"
+    o.store.close()
+
+
+def test_severity_filtered_warn_on_crit_only_channel_is_not_a_failure(tmp_path):
+    cfg = dm_cfg(tmp_path, TG)
+
+    class R_warn(R_crit):
+        def run_app(self, app, now):
+            yield "HEALTHZ", CheckResult("warn", "W", "x")
+
+    stub = Stub()
+    o = runtime.run_once(cfg, runner_factory=R_warn, now=1000, fetch=stub)
+    assert o.deliveries and not o.deliveries[0].undelivered and o.dead_man.action == "pinged"
+    o.store.close()
+
+
+def test_blind_level_config():
+    base = {"apps": [{"name": "a"}]}
+    assert config.parse(base).blind_level == "crit"
+    assert config.parse({**base, "blind_level": "warn"}).blind_level == "warn"
+    with pytest.raises(config.ConfigError):
+        config.parse({**base, "blind_level": "info"})

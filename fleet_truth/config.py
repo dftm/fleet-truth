@@ -170,6 +170,7 @@ class Config:
     alerts: tuple[AlertCfg, ...] = ()
     dead_man: DeadMan = field(default_factory=DeadMan)
     apps: tuple[App, ...] = ()
+    blind_level: str = "crit"           # level of 'monitor cannot judge' alerts, compared with channel min_status
     reference_urls: tuple[str, ...] = ()  # independent public URLs used to tell 'monitor offline' from 'fleet down'
 
     def env_names(self) -> list[str]:
@@ -493,7 +494,7 @@ def parse(data: Any) -> Config:
         raise ConfigError(["<root>: the file must contain a mapping"])
     _scan_literal_secrets(data, "", ctx)
     top = _obj(data, "", ctx, {"interval_seconds", "confirm", "data_dir", "web", "git", "credentials", "alerts",
-                               "dead_man", "defaults", "apps", "reference_urls"})
+                               "dead_man", "defaults", "apps", "reference_urls", "blind_level"})
     interval = int(_num(top, "interval_seconds", "interval_seconds", ctx, 300, 10, True)) if "interval_seconds" in top else 300
     confirm = int(_num(top, "confirm", "confirm", ctx, 2, 1, True)) if "confirm" in top else 2
     data_dir = _str(top, "data_dir", "data_dir", ctx, "~/.local/share/fleet-truth") or "~/.local/share/fleet-truth"
@@ -523,6 +524,10 @@ def parse(data: Any) -> Config:
     dm = _obj(top.get("dead_man"), "dead_man", ctx, {"url_env"})
     dead_man = DeadMan(_env(dm, "url_env", "dead_man", ctx))
 
+    blind_level = _str(top, "blind_level", "blind_level", ctx, "crit")
+    if blind_level not in ("warn", "crit"):
+        ctx.err("blind_level", "must be warn or crit")
+        blind_level = "crit"
     refs: list[str] = []
     raw_refs = top.get("reference_urls")
     if raw_refs is not None and not isinstance(raw_refs, list):
@@ -563,7 +568,7 @@ def parse(data: Any) -> Config:
 
     if ctx.errors:
         raise ConfigError(ctx.errors)
-    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), tuple(refs))
+    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), blind_level, tuple(refs))
     secrets.register(*cfg.env_names())
     return cfg
 
