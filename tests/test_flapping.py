@@ -132,7 +132,11 @@ def test_single_blips_do_not_alert_and_a_clean_window_clears_it(tmp_path):
     rn = pattern_runner([OK])
     for i in range(300):
         cycle.run_cycle(cfg, store, rn, now=1_000_000 + 90 * 300 + i * 300, deadline_s=5)
-    assert flap._load(store, "app0", "HEALTHZ")["int_alert"] == 0
+    assert flap._load(store, "app0", "HEALTHZ")["fails"] == []                        # nothing left in the window
+    rn2 = pattern_runner([CRIT] + [OK] * 30)
+    later = [d.kind for i in range(31) for d in cycle.run_cycle(cfg, store, rn2, now=1_000_000 + (90 + 300 + i) * 300,
+                                                                 deadline_s=5).decisions]
+    assert "intermittent" not in later                                                # one blip stays quiet
 
 
 def test_intermittent_config_and_message_heads():

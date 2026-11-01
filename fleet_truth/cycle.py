@@ -206,6 +206,7 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
                                           last_alert_at=prev.last_alert_at if prev else None,
                                           unhealthy_cycles=0 if row.unhealthy_since is not None else row.unhealthy_cycles)
                 store.put_state(row)
+                flap.mark_unobserved(store, app, check)
                 continue
             fo = flap.step(store, app, check, prev.status if prev else None, res.status, now, cfg.interval_seconds,
                            cfg.flap.flips, cfg.flap.cycles, cfg.flap.remind_hours, cfg.flap.clear_cycles,

@@ -71,6 +71,8 @@ def step(store: Store, app: str, check: str, prev_status: str | None, status: st
     no channel hears it."""
     st = _load(store, app, check)
     before = {k: st.get(k) for k in UNDO_KEYS}
+    if st.pop("unobserved", False):
+        prev_status = None   # the previous cycle was not observed (monitor offline): no flip can be measured against it
     window = cycles * interval_s
     hist = [e for e in st["flips"] if now - e[0] <= window]
     if prev_status is not None and (prev_status in GOOD) != (status in GOOD):
@@ -140,9 +142,7 @@ def step(store: Store, app: str, check: str, prev_status: str | None, status: st
 
     if decision is None and not st["flapping"] and not alerted:
         n = len(fails)
-        if n == 0:
-            st["int_alert"] = 0
-        elif n >= min_failures:
+        if n >= min_failures:
             lvl = "crit" if any(e[1] == "crit" for e in fails) else "warn"
             newest = fails[-1][0]
             # at most once per int_remind_hours, and a repeat needs a NEW failure since the last message
@@ -153,6 +153,13 @@ def step(store: Store, app: str, check: str, prev_status: str | None, status: st
                                                  f"(last at {int(newest)}), none long enough to confirm")
     _save(store, app, check, st)
     return Outcome(st["flapping"], decision, before)
+
+
+def mark_unobserved(store: Store, app: str, check: str) -> None:
+    """This cycle was not observed by the flap and intermittent windows (a correlated cause owned it)."""
+    st = _load(store, app, check)
+    st["unobserved"] = True
+    _save(store, app, check, st)
 
 
 def undo(store: Store, app: str, check: str, kind: str, before: dict | None) -> None:
