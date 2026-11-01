@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import logging
 import os
@@ -29,6 +30,10 @@ class RunLocked(Exception):
     """Another run holds the data dir's run lock."""
 
 
+class LockError(Exception):
+    """The lock itself failed (not contention): e.g. ENOLCK on drvfs, 9p or NFS. An internal error, exit 4."""
+
+
 @contextlib.contextmanager
 def run_lock(cfg: cfgmod.Config):
     """Exclusive non-blocking flock on <data_dir>/run.lock: two overlapping runs would send duplicate alerts."""
@@ -38,8 +43,13 @@ def run_lock(cfg: cfgmod.Config):
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except BlockingIOError:   # EWOULDBLOCK/EAGAIN: someone else holds it
             raise RunLocked("another fleet-truth run holds the lock") from None
+        except OSError as e:      # anything else is a broken lock, not a busy one
+            name = errno.errorcode.get(e.errno or 0, "errno " + str(e.errno))
+            log.error("run lock failed on %s: %s", d / "run.lock", name)
+            raise LockError(f"cannot take the run lock in {d} ({name}); keep data_dir on the Linux filesystem, "
+                            "not on /mnt/c (drvfs/9p/NFS may not support flock)") from None
         yield
     finally:
         os.close(fd)  # closing releases the flock

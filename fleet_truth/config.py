@@ -727,6 +727,9 @@ def render_plan(cfg: Config) -> str:
     lines = [f"{len(cfg.apps)} apps, interval {cfg.interval_seconds}s, confirm {cfg.confirm}"]
     for a in cfg.apps:
         lines.append(f"  {a.name}  branch={a.branch}  checks: {', '.join(checks_for(a)) or '(none)'}")
+    if str(Path(cfg.data_dir).expanduser()).startswith("/mnt/"):
+        lines.append("warning: data_dir is under /mnt/ (WSL drvfs/9p): file locks and SQLite WAL may not work there; "
+                     "keep data_dir on the Linux filesystem")
     missing = [n for n in cfg.env_names() if secrets.get(n) is None]
     if missing:
         lines.append("missing env vars (names only; dependent checks will report unknown): " + ", ".join(missing))

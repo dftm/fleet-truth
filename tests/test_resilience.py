@@ -96,3 +96,49 @@ def test_lock_is_released_after_a_failing_run(tmp_path, monkeypatch):
         runtime.run_once(cfg, runner_factory=R_ok, fetch=Stub())
     monkeypatch.undo()
     runtime.run_once(cfg, runner_factory=R_ok, now=5, fetch=Stub(body=b"{}")).store.close()
+
+
+# ------------------------------------------------------------------ review 2 R4: a broken lock is not a busy lock
+def test_enolck_is_an_internal_error_with_fail_ping_and_exit_4(tmp_path, monkeypatch, capsys):
+    import errno
+    import fcntl as fc
+    cfg = dm_cfg(tmp_path, NTFY)
+    real = fc.flock
+
+    def broken(fd, op):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(runtime.fcntl, "flock", broken)
+    stub = Stub()
+    with pytest.raises(runtime.LockError) as e:
+        runtime.run_once(cfg, runner_factory=R_ok, fetch=stub)
+    assert "ENOLCK" in str(e.value) and "/mnt/c" in str(e.value)
+    assert [c["url"] for c in stub.calls] == ["https://hc.example.com/ping/SEKRIT-dm/fail"]
+    f = tmp_path / "fleet.yaml"
+    f.write_text(f"data_dir: {tmp_path / 'd2'}\napps: [{{name: a, health: {{url: 'https://a.example.com/'}}}}]\n")
+    assert cli.main(["once", "-c", str(f)]) == 4
+    assert "ENOLCK" in capsys.readouterr().err
+    for code in (errno.EACCES, errno.EINVAL, errno.EIO):
+        monkeypatch.setattr(runtime.fcntl, "flock", lambda fd, op, c=code: (_ for _ in ()).throw(OSError(c, "x")))
+        with pytest.raises(runtime.LockError):
+            runtime.run_once(cfg, runner_factory=R_ok, fetch=Stub())
+    monkeypatch.setattr(runtime.fcntl, "flock", real)
+
+
+def test_real_contention_is_still_exit_5(tmp_path, capsys):
+    f = tmp_path / "fleet.yaml"
+    f.write_text(f"data_dir: {tmp_path / 'd'}\napps: [{{name: a, health: {{url: 'https://a.example.com/'}}}}]\n")
+    (tmp_path / "d").mkdir()
+    fd = os.open(tmp_path / "d" / "run.lock", os.O_CREAT | os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        assert cli.main(["once", "-c", str(f)]) == 5
+    finally:
+        os.close(fd)
+
+
+def test_check_config_warns_about_mnt_data_dir(tmp_path, capsys):
+    f = tmp_path / "fleet.yaml"
+    f.write_text("data_dir: /mnt/c/fleet\napps: [{name: a, health: {url: 'https://a.example.com/'}}]\n")
+    assert cli.main(["check-config", str(f)]) == 0
+    assert "warning: data_dir is under /mnt/" in capsys.readouterr().out
