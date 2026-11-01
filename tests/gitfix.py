@@ -19,6 +19,7 @@ def sh(cwd, *args, env=None):
 
 class Repos:
     def __init__(self, root: Path, branch="main"):
+        root.mkdir(parents=True, exist_ok=True)
         self.root = root
         self.branch = branch
         self.origin = root / "origin.git"

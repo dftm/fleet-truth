@@ -79,3 +79,19 @@ def _block_network(monkeypatch, request):
     monkeypatch.setattr(socket, "gethostbyname", gethostbyname)
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+
+
+@pytest.fixture(autouse=True)
+def _git_never_leaves_the_machine(monkeypatch):
+    """No git invocation may name a remote other than a local path, file:// or 127.0.0.1 (never github.com)."""
+    from fleet_truth import gitmirror
+
+    real = gitmirror.run_git
+
+    def guarded(args, **kw):
+        for a in args:
+            if isinstance(a, str) and "://" in a and not a.startswith("file://") and "://127.0.0.1" not in a:
+                raise AssertionError(f"test tried to run git against a real remote: {a!r}")
+        return real(args, **kw)
+
+    monkeypatch.setattr(gitmirror, "run_git", guarded)

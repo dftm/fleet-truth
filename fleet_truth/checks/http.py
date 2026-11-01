@@ -50,17 +50,20 @@ def _request(url: str, headers: dict, allow_private: bool, timeout_s: float, fet
 
 
 def _fetch_error_result(e: net.FetchError) -> CheckResult:
+    """Map a transport failure. data["net_error"] marks failures of the network path itself (used to
+    tell 'monitor offline' from 'app down' when every app fails at once)."""
+    nd = {"net_error": e.kind}
     if e.kind == "BLOCKED":
         return CheckResult("unknown", "BLOCKED_TARGET", f"refused by the SSRF guard: {e.message}")
     if e.kind == "BAD_URL":
         return CheckResult("unknown", "BAD_URL", e.message)
     if e.kind == "TIMEOUT":
-        return CheckResult("crit", "TIMEOUT", e.message)
+        return CheckResult("crit", "TIMEOUT", e.message, nd)
     if e.kind == "TLS":
         return CheckResult("crit", "TLS_ERROR", e.message)
     if e.kind == "TOO_LARGE":
         return CheckResult("crit", "BAD_BODY", e.message)
-    return CheckResult("crit", "DOWN", e.message)
+    return CheckResult("crit", "DOWN", e.message, nd)
 
 
 def _same_type_equal(a, b) -> bool:
