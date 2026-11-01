@@ -72,7 +72,7 @@ def test_a_channel_that_always_hangs_backs_off_3_then_6_then_12_cycles(tmp_path)
 def test_only_channel_hanging_leaves_the_alert_undelivered_without_resend_storm(tmp_path):
     gate = threading.Event()
     hung = Chan("hung", hang=gate)
-    d, _ = disp(tmp_path, [hung], channel_budget_s=0.1)
+    d, _ = disp(tmp_path, [hung], channel_budget_s=0.1, budget_s=0.1)
     try:
         outs = [d.dispatch([decision()])[0] for _ in range(6)]
     finally:
@@ -99,7 +99,7 @@ def test_late_results_are_discarded_and_never_applied(tmp_path):
             return alerts.SendResult(True)
 
     late = Late()
-    d, store = disp(tmp_path, [late], channel_budget_s=0.1)
+    d, store = disp(tmp_path, [late], channel_budget_s=0.1, budget_s=0.1)
     out = d.dispatch([decision()])
     time.sleep(0.7)
     assert out[0].delivered == 0 and out[0].unknown == 1
@@ -110,7 +110,7 @@ def test_late_results_are_discarded_and_never_applied(tmp_path):
 
 def test_a_real_delivery_clears_the_backoff(tmp_path):
     chan = Chan("c", delay=0.3)
-    d, store = disp(tmp_path, [chan], channel_budget_s=0.1)
+    d, store = disp(tmp_path, [chan], channel_budget_s=0.1, budget_s=0.1)
     d.dispatch([decision()])
     assert json.loads(store.meta_get("bo:c")) == {"level": 3, "skips": 3}
     chan.delay = 0.0
@@ -246,3 +246,56 @@ def test_skipped_results_are_not_recorded_and_do_not_affect_channel_health(tmp_p
     assert out[0].skipped == 1 and out[0].delivered == 0 and not out[0].undelivered
     assert store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 0
     assert d.channels_healthy() is True
+
+
+# ------------------------------------------------------------------ review 4 G7
+def test_a_slow_but_successful_send_is_a_delivery_not_an_unknown_outcome(tmp_path):
+    """The only channel needs 0.3 s, its own budget is 0.1 s, the overall cap 2 s: the late success counts."""
+    slow = Chan("slow", delay=0.3)
+    d, store = disp(tmp_path, [slow], channel_budget_s=0.1, budget_s=2.0)
+    outs = [d.dispatch([decision(app=f"a{i}")])[0] for i in range(4)]
+    assert [o.delivered for o in outs] == [1, 1, 1, 1] and not any(o.undelivered for o in outs)
+    assert len(slow.sent) == 4, "one send per alert: no duplicates, no backoff"
+    assert store.meta_get("bo:slow") is None and d.channels_healthy()
+
+
+def test_the_overall_cap_still_bounds_a_channel_that_never_answers(tmp_path):
+    gate = threading.Event()
+    hung = Chan("hung", hang=gate)
+    d, _ = disp(tmp_path, [hung], channel_budget_s=0.1, budget_s=0.4)
+    try:
+        t0 = time.monotonic()
+        out = d.dispatch([decision()])[0]
+        assert time.monotonic() - t0 < 1.5 and out.unknown == 1 and out.undelivered
+    finally:
+        gate.set()
+
+
+def test_a_slow_reconcile_does_not_put_a_delivering_channel_into_backoff(tmp_path):
+    class SlowReconcile(Chan):
+        def reconcile(self, cycle_clear, clear_apps):
+            time.sleep(0.5)
+
+    chan = SlowReconcile("hc")
+    d, store = disp(tmp_path, [chan], channel_budget_s=0.15, budget_s=0.15)
+    out = d.dispatch([decision()])[0]
+    assert out.delivered == 1 and out.unknown == 0
+    assert store.meta_get("bo:hc") is None
+    assert d.dispatch([decision()])[0].backoff == 0
+
+
+@pytest.mark.parametrize("exc", [SystemExit(3), KeyboardInterrupt(), GeneratorExit(), RuntimeError("x")])
+def test_a_sender_raising_a_base_exception_is_a_failed_send_not_a_lost_one(tmp_path, exc):
+    class Raiser:
+        name, min_status = "raiser", "info"
+
+        def send(self, msg):
+            raise exc
+
+    d, store = disp(tmp_path, [Raiser()])
+    out = d.dispatch([decision()])[0]
+    assert out.delivered == 0 and out.undelivered
+    rows = store.db.execute("SELECT ok, error FROM alerts").fetchall()
+    assert [(r["ok"], r["error"]) for r in rows] == [(0, type(exc).__name__)]
+    d._deadline = time.monotonic() + 5
+    assert d.test_all("v")["raiser"].error == type(exc).__name__

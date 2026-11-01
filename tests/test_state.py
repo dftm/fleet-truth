@@ -168,7 +168,7 @@ def test_unknown_time_counts_toward_blind_timer_even_after_a_warn_blip_free_run(
 def test_genuine_recovery_ends_the_episode_and_a_new_one_starts_clean():
     out, row = decisions(["crit", "unknown", "ok", "ok", "unknown", "unknown"])
     assert [d.kind for _, d in out] == ["alert", "recovered"]
-    assert row.unhealthy_cycles == 4 and row.worst_status == "crit" and row.ok_notified == 1   # re-opened within the cooldown: same episode
+    assert row.unhealthy_cycles == 2 and row.worst_status == "unknown"   # a delivered [OK] closed it: the new episode starts clean
     out, _ = decisions(["crit", "unknown", "ok", "ok", "unknown", "unknown", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "crit", "crit"])
     assert [d.kind for _, d in out] == ["alert", "recovered", "alert"]
 
@@ -207,13 +207,13 @@ def test_recovery_needs_recover_after_consecutive_ok_cycles():
     assert [d.kind for _, d in out] == ["alert"]      # a lone ok never ends it
 
 
-def test_a_failure_within_the_cooldown_after_recovery_continues_the_same_episode():
-    # crit,crit alert; ok,ok recover; crit again 5 min later: no second CRIT, and the later recovery is silent
+def test_a_failure_right_after_a_recovery_is_a_new_episode_with_its_own_alert():
+    """Review 4 G1: it used to be silent for up to 6 h (the old episode was re-opened with its old reminder clock)."""
     out, row = decisions(["crit", "crit", "ok", "ok", "crit", "crit", "ok", "ok"])
-    assert [d.kind for _, d in out] == ["alert", "recovered"], "one pair only"
-    assert row.recovered_at is not None
-    day_out = day(["crit", "crit", "ok", "ok"])
-    assert [d.kind for _, d in day_out].count("alert") == 1 and [d.kind for _, d in day_out].count("recovered") == 1
+    assert [d.kind for _, d in out] == ["alert", "recovered", "alert", "recovered"]
+    assert [i for i, _ in out] == [1, 3, 5, 7]
+    out, _ = decisions(["crit", "crit", "ok", "ok", "crit", "ok", "ok"])
+    assert [d.kind for _, d in out] == ["alert", "recovered"]     # a single new blip is a blip again (confirm applies)
 
 
 def test_after_the_cooldown_a_new_episode_alerts_again():

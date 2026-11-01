@@ -175,7 +175,7 @@ class NtfySender(_Base):
             miss = (miss + "; " if miss else "env var not set: ") + self.cfg.token_env
         if miss:
             return SendResult(False, miss)
-        headers = {"Title": "Fleet Truth", "Priority": "5" if msg.level == "crit" and msg.kind != "recovered" else "3",
+        headers = {"Title": "Fleet Truth", "Priority": "5" if msg.level == "crit" and msg.kind not in ("recovered", "stable") else "3",
                    "Content-Type": "text/plain; charset=utf-8"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -233,9 +233,9 @@ class WebhookSender(_Base):
             if self.cfg.mode == "healthchecks":
                 # every message is a real call; only a 2xx counts. The "up" ping is sent only when nothing it
                 # could contradict is still down (a shared base URL must not turn green because ONE app recovered)
-                if msg.kind in ("recovered", "test"):
+                if msg.kind in ("recovered", "test", "stable"):   # by kind, never by level: these are "up", not "down"
                     clear = msg.app_clear if per_app else msg.cycle_clear
-                    if msg.kind == "recovered" and not clear:
+                    if msg.kind in ("recovered", "stable") and not clear:
                         return SendResult(False, "success ping withheld: other checks are still crit or unknown", skipped=True)
                     target = url
                 elif msg.level == "crit":
@@ -465,7 +465,7 @@ class Dispatcher:
         def run() -> None:
             try:
                 box["r"] = s.send(msg)
-            except Exception as e:  # noqa: BLE001
+            except BaseException as e:  # noqa: BLE001 - SystemExit/KeyboardInterrupt in a sender must not vanish
                 box["r"] = SendResult(False, type(e).__name__)
 
         t = threading.Thread(target=run, daemon=True, name=f"ft-send-{s.name}")
@@ -515,7 +515,7 @@ class Dispatcher:
                     ctx.inflight[s.name] = i
                 try:
                     res = s.send(msgs[i])
-                except Exception as e:  # noqa: BLE001 - a broken sender must not stop the others
+                except BaseException as e:  # noqa: BLE001 - a broken sender (even SystemExit) is a failed send, not a lost one
                     res = SendResult(False, type(e).__name__)
                 with ctx.lock:
                     if ctx.closed:
@@ -525,7 +525,7 @@ class Dispatcher:
             if hasattr(s, "reconcile"):
                 try:
                     s.reconcile(cycle_clear, clear_apps)
-                except Exception:  # noqa: BLE001
+                except BaseException:  # noqa: BLE001
                     pass
 
         for s in self.senders:
@@ -538,6 +538,20 @@ class Dispatcher:
             t.start()
         for name, t in threads.items():
             t.join(max(0.0, deadline - time.monotonic()))
+        hung_now = [n for n, t in threads.items() if t.is_alive()]
+        if hung_now:
+            # A send that is merely SLOW may still succeed: when some decision has not reached anyone yet, keep
+            # waiting for the slow channels up to the overall cap. A late success is then a delivery (not an
+            # "unknown outcome" that would be re-sent every backoff window).
+            with ctx.lock:
+                unheard = any(
+                    elig_any and not any((ctx.results.get((s.name, i)) is not None and ctx.results[(s.name, i)].ok
+                                          and not ctx.results[(s.name, i)].skipped) for s in self.senders)
+                    for i in range(len(decisions)) for elig_any in [any(i in elig[s.name] for s in self.senders)])
+            if unheard:
+                grace_end = start + self.budget_s
+                for n in hung_now:
+                    threads[n].join(max(0.0, grace_end - time.monotonic()))
         with ctx.lock:
             ctx.closed = True
             results = dict(ctx.results)
@@ -572,7 +586,7 @@ class Dispatcher:
                     delivered += 1
                     ok_channels.add(s.name)
             out.append(Delivery(d, eligible, delivered, len(self.senders), skipped, unknown, backoff))
-        for name in bad_unknown | (hung & set(threads)):
+        for name in bad_unknown:      # only a channel that left a message unanswered; a slow reconcile is not a hang
             self._bo_trip(name)
         for name in ok_channels - hung:
             if self._bo_get(name)["level"]:

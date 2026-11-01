@@ -27,8 +27,9 @@ REMIND_S = {"crit": 6 * 3600, "warn": 24 * 3600}
 
 @dataclass(frozen=True)
 class Outcome:
-    suppress: bool                       # drop this check's alert/reminder/recovered/blind decisions this cycle
+    suppress: bool                       # drop this check's alert/reminder/recovered decisions this cycle
     decision: tuple | None = None        # (kind, level, detail)
+    undo: dict | None = None             # exact pre-step values of UNDO_KEYS
 
 
 def _key(app: str, check: str) -> str:
@@ -58,10 +59,18 @@ def _save(store: Store, app: str, check: str, st: dict) -> None:
     store.meta_set(_key(app, check), json.dumps(st))
 
 
+UNDO_KEYS = ("last_alert", "last_msg", "notified", "worst", "clear", "flapping", "bad_run", "clear_need", "int_alert",
+             "int_seen")
+
+
 def step(store: Store, app: str, check: str, prev_status: str | None, status: str, now: float, interval_s: float,
          flips: int, cycles: int, remind_hours: float, clear_cycles: int,
-         window_cycles: int, min_failures: int) -> Outcome:
+         window_cycles: int, min_failures: int, alerted: bool = False, int_remind_hours: float = 24.0) -> Outcome:
+    """`alerted`: a failure alert for this check's current episode is in force (a confirmed outage), which keeps
+    the intermittent rule out of it. Returns the decision plus `undo`, the exact pre-step values to restore if
+    no channel hears it."""
     st = _load(store, app, check)
+    before = {k: st.get(k) for k in UNDO_KEYS}
     window = cycles * interval_s
     hist = [e for e in st["flips"] if now - e[0] <= window]
     if prev_status is not None and (prev_status in GOOD) != (status in GOOD):
@@ -70,14 +79,22 @@ def step(store: Store, app: str, check: str, prev_status: str | None, status: st
     decision = None
     remind_s = remind_hours * 3600
 
-    # failure episodes for the intermittent rule (recorded always, evaluated only when not flapping)
+    # Failure EPISODES for the intermittent rule. A run of bad cycles counts once, however its statuses mix; a run
+    # covered by an alerted outage is not "too short to confirm" and is removed again; nothing is counted while the
+    # check is flapping (the [FLAPPING] notice covers it).
     iwindow = max(86400.0, window_cycles * interval_s)
     fails = [e for e in st["fails"] if now - e[0] <= iwindow]
     if status in GOOD:
         st["run_counted"] = False
-    elif status in ("warn", "crit") and not st.get("run_counted"):
-        fails.append([int(now), status])      # one entry per run of bad cycles, however its statuses mix
+        st["run_entry"] = None
+    elif alerted:
+        if st.get("run_entry") is not None:
+            fails = [e for e in fails if e[0] != st["run_entry"]]
+            st["run_entry"] = None
         st["run_counted"] = True
+    elif status in ("warn", "crit") and not st.get("run_counted") and not st["flapping"]:
+        fails.append([int(now), status])
+        st["run_counted"], st["run_entry"] = True, int(now)
     st["fails"] = fails
 
     if not st["flapping"]:
@@ -88,7 +105,8 @@ def step(store: Store, app: str, check: str, prev_status: str | None, status: st
             recent = st["last_msg"] and now - st["last_msg"] < 86400
             need = min(st.get("clear_need", clear_cycles) * 2, clear_cycles * 8) if recent else clear_cycles
             st.update(flapping=True, worst=lvl, clear=0, last_alert=int(now), bad_run=0, clear_need=need,
-                      notified=True, last_msg=int(now))
+                      notified=True, last_msg=int(now), fails=[], run_entry=None)   # the flap episode is not an "intermittent" one
+            fails = []
             decision = ("flapping", lvl, f"changed state {len(hist)} times in the last {cycles} cycles; individual "
                                          f"alerts for this check are paused until it stays ok for {need} cycles")
     else:
@@ -97,10 +115,10 @@ def step(store: Store, app: str, check: str, prev_status: str | None, status: st
             st["worst"] = "crit"
         st["clear"] = st["clear"] + 1 if status in GOOD else 0
         st["bad_run"] = 0 if status in GOOD else st.get("bad_run", 0) + 1
-        if st["bad_run"] >= cycles and st["worst"] in ("warn", "crit"):
+        if st["bad_run"] >= cycles:
             # a whole flap window without a single flip: this is a sustained failure, not flapping. Hand the check
-            # back to normal alerting, and say so with a real alert (the pair alerts were suppressed meanwhile).
-            lvl = st["worst"] if status in ("warn", "crit") else "crit" if st["worst"] == "crit" else "warn"
+            # back to normal alerting at the WORST level seen, with a real alert (the pair alerts were suppressed).
+            lvl = st["worst"]
             st.update(flapping=False, flips=[], clear=0, last_alert=0, bad_run=0)
             hist = []
             decision = ("sustained", lvl, f"failing for {cycles} cycles in a row after flapping: a sustained failure "
@@ -110,40 +128,36 @@ def step(store: Store, app: str, check: str, prev_status: str | None, status: st
                 decision = ("stable", st["worst"], f"stable again: ok for {st.get('clear_need', clear_cycles)} cycles in a row; "
                                                    "normal alerting resumed")
                 st.update(notified=False, last_msg=int(now))
-            st.update(flapping=False, flips=[], clear=0, last_alert=0, bad_run=0)
-            hist = []
+            st.update(flapping=False, flips=[], clear=0, last_alert=0, bad_run=0, fails=[], run_entry=None)
+            hist, fails = [], []
         elif escalated:   # the [FLAPPING] notice went out at warn; a crit dip must reach crit-only channels too
             st.update(last_alert=int(now), notified=True, last_msg=int(now))
             decision = ("flapping", "crit", "still flapping, and the dips now include a crit failure")
-        elif now - st["last_alert"] >= remind_s:
+        elif hist and now - st["last_alert"] >= remind_s:   # only while it is really still flapping
             st["last_alert"] = int(now)
             st.update(notified=True, last_msg=int(now))
             decision = ("flapping", st["worst"], f"still flapping ({len(hist)} state changes in the last {cycles} cycles)")
 
-    if decision is None and not st["flapping"]:
+    if decision is None and not st["flapping"] and not alerted:
         n = len(fails)
         if n == 0:
             st["int_alert"] = 0
         elif n >= min_failures:
             lvl = "crit" if any(e[1] == "crit" for e in fails) else "warn"
-            if not st["int_alert"] or now - st["int_alert"] >= REMIND_S[lvl]:
-                st["int_alert"] = int(now)
+            newest = fails[-1][0]
+            # at most once per int_remind_hours, and a repeat needs a NEW failure since the last message
+            if not st["int_alert"] or (now - st["int_alert"] >= int_remind_hours * 3600 and newest > st.get("int_seen", 0)):
+                st.update(int_alert=int(now), int_seen=newest)
                 hours = iwindow / 3600
                 decision = ("intermittent", lvl, f"{n} separate failures in the last {hours:.0f} h "
-                                                 f"(last at {int(fails[-1][0])}); each was too short to confirm")
+                                                 f"(last at {int(newest)}), none long enough to confirm")
     _save(store, app, check, st)
-    return Outcome(st["flapping"], decision)
+    return Outcome(st["flapping"], decision, before)
 
 
-def undo(store: Store, app: str, check: str, kind: str, clear_cycles: int) -> None:
-    """No channel heard the decision: make the next cycle produce it again."""
+def undo(store: Store, app: str, check: str, kind: str, before: dict | None) -> None:
+    """No channel heard the decision: restore the exact pre-step values so the next cycle produces it again."""
     st = _load(store, app, check)
-    if kind == "flapping":
-        st.update(last_alert=0, last_msg=0, notified=False)
-    elif kind == "intermittent":
-        st["int_alert"] = 0
-    elif kind == "sustained":   # the sustained-failure hand-over: stay in flapping until the alert gets through
-        st.update(flapping=True, bad_run=10 ** 6)
-    elif kind == "stable":
-        st.update(flapping=True, clear=max(clear_cycles - 1, 0), notified=True)
-    _save(store, app, check, st)
+    if before:
+        st.update(before)
+        _save(store, app, check, st)

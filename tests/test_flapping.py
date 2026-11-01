@@ -88,15 +88,16 @@ def feed(store, seq, t0=2000, **kw):
 def test_undelivered_flapping_and_stable_are_produced_again(tmp_path):
     store = Store(tmp_path / "s.db")
     outs = feed(store, ["crit", "ok", "crit", "ok", "crit"])
-    assert any(o.decision and o.decision[0] == "flapping" for o in outs)
-    flap.undo(store, "a", "c", "flapping", 3)
+    fl = [o for o in outs if o.decision and o.decision[0] == "flapping"][0]
+    flap.undo(store, "a", "c", "flapping", fl.undo)
     again = feed(store, ["crit"], t0=2000 + 5 * 300, remind_hours=0.001)
     assert again[0].decision and again[0].decision[0] == "flapping"
     # stable: three ok cycles end it; if that notice was lost the next ok cycle produces it again
     outs = feed(store, ["ok", "ok", "ok"], t0=2000 + 6 * 300)
     assert outs[-1].decision[0] == "stable" and not flap._load(store, "a", "c")["flapping"]
-    flap.undo(store, "a", "c", "stable", 3)
-    assert flap._load(store, "a", "c")["flapping"]
+    flap.undo(store, "a", "c", "stable", outs[-1].undo)
+    st = flap._load(store, "a", "c")
+    assert st["flapping"] and st["clear"] == 2 and st["notified"]       # the exact previous state, not a guess
     redo = feed(store, ["ok"], t0=2000 + 9 * 300)
     assert redo[0].decision and redo[0].decision[0] == "stable"
 

@@ -32,6 +32,7 @@ class AlertDecision:
     consecutive: int
     prev_alerted_status: str | None = None   # to roll back if no channel accepted the message
     prev_last_alert_at: int | None = None
+    flap_undo: dict | None = None            # exact flap-module values to restore on rollback (flap/stable/intermittent)
 
 
 BAD_RANK = {"unknown": 1, "warn": 2, "crit": 3}
@@ -59,8 +60,8 @@ def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: fl
     bad = r.status not in HEALTHY
     has_ep = prev is not None and prev.unhealthy_since is not None
     p_open = has_ep and prev.recovered_at is None
-    p_reopen = (has_ep and prev.recovered_at is not None and prev.ep_alerted is not None
-                and now_i - prev.recovered_at <= reopen_s)   # only an episode that was alerted re-opens
+    p_reopen = False   # a delivered [OK] closes the episode for good; an UNDELIVERED one is rolled back (cycle.py),
+    #                    which re-opens it by clearing recovered_at, so it is retried and a returning failure continues it
     ep_since, ep_cycles = (prev.unhealthy_since, prev.unhealthy_cycles) if has_ep else (None, 0)
     worst, worst_v = (prev.worst_status, prev.worst_verdict) if has_ep else (None, None)
     ok_streak = 0
@@ -76,11 +77,9 @@ def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: fl
 
     pending = (not bad) and p_open and ((prev.ok_streak + 1) if prev.status in HEALTHY else 1) < recover_after
     if bad:
-        if p_reopen:  # same episode continuing: restore what was in force, and remember the [OK] already went out
-            alerted, last_at = prev.ep_alerted, prev.ep_last_alert
-            ok_notified = 1 if prev.ep_alerted else 0
-        elif not p_open:  # a genuinely new episode
+        if not p_open:  # a genuinely new episode: nothing is carried over from the previous one
             ep_since, ep_cycles, worst, worst_v, ok_notified = now_i, 0, None, None, 0
+            alerted, last_at = None, None
         recovered_at, ep_alerted, ep_last = None, None, None
         ep_cycles += 1
         if worst is None or BAD_RANK[r.status] > BAD_RANK[worst]:

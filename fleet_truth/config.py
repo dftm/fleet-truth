@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +92,7 @@ class FlapCfg:
 class IntermittentCfg:
     window_cycles: int = 48    # window = max(24 h, window_cycles x interval)
     min_failures: int = 3      # separate failure episodes in the window that raise [INTERMITTENT]
+    remind_hours: float = 24.0  # at most one [INTERMITTENT] per check per this many hours, and only for a new failure
 
 
 @dataclass(frozen=True)
@@ -266,15 +268,20 @@ def _obj(v: Any, path: str, ctx: _Ctx, allowed: set[str], required: set[str] = f
     return {k: x for k, x in v.items() if k in allowed}
 
 
-def _num(d: dict, key: str, path: str, ctx: _Ctx, default: float, lo: float = 0.0, integer: bool = False):
+def _num(d: dict, key: str, path: str, ctx: _Ctx, default: float, lo: float = 0.0, integer: bool = False,
+         hi: float | None = None):
+    """A finite number within [lo, hi]. NaN, infinity, bools and strings are errors, never a traceback later."""
     if key not in d:
         return default
     v = d[key]
     if isinstance(v, bool) or not isinstance(v, (int, float)) or (integer and not isinstance(v, int)):
         ctx.err(f"{path}.{key}", "must be an integer" if integer else "must be a number")
         return default
-    if v < lo:
-        ctx.err(f"{path}.{key}", f"must be >= {lo:g}")
+    if isinstance(v, float) and not math.isfinite(v):
+        ctx.err(f"{path}.{key}", "must be a finite number (not NaN or infinity)")
+        return default
+    if v < lo or (hi is not None and v > hi):
+        ctx.err(f"{path}.{key}", f"must be between {lo:g} and {hi:g}" if hi is not None else f"must be >= {lo:g}")
         return default
     return v
 
@@ -607,23 +614,27 @@ def parse(data: Any) -> Config:
     dead_man = DeadMan(_env(dm, "url_env", "dead_man", ctx))
 
     fl = _obj(top.get("flap"), "flap", ctx, {"flips", "cycles", "remind_hours", "clear_cycles"})
-    flap = FlapCfg(int(_num(fl, "flips", "flap", ctx, 4, 2, True)), int(_num(fl, "cycles", "flap", ctx, 12, 2, True)),
-                   float(_num(fl, "remind_hours", "flap", ctx, 6.0, 0.001)),
-                   int(_num(fl, "clear_cycles", "flap", ctx, 12, 1, True)))
-    it = _obj(top.get("intermittent"), "intermittent", ctx, {"window_cycles", "min_failures"})
-    intermittent = IntermittentCfg(int(_num(it, "window_cycles", "intermittent", ctx, 48, 2, True)),
-                                   int(_num(it, "min_failures", "intermittent", ctx, 3, 2, True)))
-    recover_after = int(_num(top, "recover_after", "recover_after", ctx, 2, 1, True)) if "recover_after" in top else 2
-    reopen_cycles = int(_num(top, "reopen_cooldown_cycles", "reopen_cooldown_cycles", ctx, 6, 0, True)) \
+    flap = FlapCfg(int(_num(fl, "flips", "flap", ctx, 4, 2, True, 100)), int(_num(fl, "cycles", "flap", ctx, 12, 2, True, 1000)),
+                   float(_num(fl, "remind_hours", "flap", ctx, 6.0, 0.25, False, 720)),
+                   int(_num(fl, "clear_cycles", "flap", ctx, 12, 1, True, 1000)))
+    if flap.flips > flap.cycles:
+        ctx.err("flap.flips", f"must be <= flap.cycles ({flap.cycles}): more flips than cycles can never happen, "
+                              "so flap detection would be silently off")
+    it = _obj(top.get("intermittent"), "intermittent", ctx, {"window_cycles", "min_failures", "remind_hours"})
+    intermittent = IntermittentCfg(int(_num(it, "window_cycles", "intermittent", ctx, 48, 2, True, 10000)),
+                                   int(_num(it, "min_failures", "intermittent", ctx, 3, 2, True, 1000)),
+                                   float(_num(it, "remind_hours", "intermittent", ctx, 24.0, 1, False, 720)))
+    recover_after = int(_num(top, "recover_after", "recover_after", ctx, 2, 1, True, 20)) if "recover_after" in top else 2
+    reopen_cycles = int(_num(top, "reopen_cooldown_cycles", "reopen_cooldown_cycles", ctx, 6, 0, True, 100)) \
         if "reopen_cooldown_cycles" in top else 6
     blind_level = _str(top, "blind_level", "blind_level", ctx, "crit")
     if blind_level not in ("warn", "crit"):
         ctx.err("blind_level", "must be warn or crit")
         blind_level = "crit"
-    off_cycles = int(_num(top, "offline_suppress_cycles", "offline_suppress_cycles", ctx, 2, 0, True)) if "offline_suppress_cycles" in top else 2
-    budget = float(_num(top, "alert_budget_seconds", "alert_budget_seconds", ctx, 60.0, 1)) if "alert_budget_seconds" in top else 60.0
-    chan_budget = float(_num(top, "channel_budget_seconds", "channel_budget_seconds", ctx, 20.0, 1)) if "channel_budget_seconds" in top else 20.0
-    backoff_cycles = int(_num(top, "channel_backoff_cycles", "channel_backoff_cycles", ctx, 3, 1, True)) if "channel_backoff_cycles" in top else 3
+    off_cycles = int(_num(top, "offline_suppress_cycles", "offline_suppress_cycles", ctx, 2, 0, True, 1000)) if "offline_suppress_cycles" in top else 2
+    budget = float(_num(top, "alert_budget_seconds", "alert_budget_seconds", ctx, 60.0, 1, False, 3600)) if "alert_budget_seconds" in top else 60.0
+    chan_budget = float(_num(top, "channel_budget_seconds", "channel_budget_seconds", ctx, 20.0, 1, False, 600)) if "channel_budget_seconds" in top else 20.0
+    backoff_cycles = int(_num(top, "channel_backoff_cycles", "channel_backoff_cycles", ctx, 3, 1, True, 100)) if "channel_backoff_cycles" in top else 3
     refs: list[str] = []
     raw_refs = top.get("reference_urls")
     if raw_refs is not None and not isinstance(raw_refs, list):

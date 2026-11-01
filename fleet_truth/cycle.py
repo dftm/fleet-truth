@@ -199,25 +199,39 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
             reopen_s = max(1800.0, cfg.reopen_cooldown_cycles * cfg.interval_seconds)
             row, decision = advance(prev, app, check, res, now, cfg.confirm, cfg.blind_level, cfg.recover_after, reopen_s)
             if (app, check) in suppressed:
-                # a correlated cause is reported once for all apps: nothing is "alerted" for this one, and its
-                # confirmation restarts from zero so the pending-cycle retry cannot fire for a suppressed episode
+                # a correlated cause is reported once for all apps: nothing is "alerted" for this one, its
+                # confirmation restarts from zero, and the cycle is NOT observed by the flap / intermittent windows
+                # (their messages would be dropped while their state kept growing)
                 row = dataclasses.replace(row, alerted_status=prev.alerted_status if prev else None,
                                           last_alert_at=prev.last_alert_at if prev else None,
                                           unhealthy_cycles=0 if row.unhealthy_since is not None else row.unhealthy_cycles)
-                decision = None
-            store.put_state(row)
+                store.put_state(row)
+                continue
             fo = flap.step(store, app, check, prev.status if prev else None, res.status, now, cfg.interval_seconds,
                            cfg.flap.flips, cfg.flap.cycles, cfg.flap.remind_hours, cfg.flap.clear_cycles,
-                           cfg.intermittent.window_cycles, cfg.intermittent.min_failures)
-            if fo.suppress:
-                decision = None   # a flapping check gets the one [FLAPPING] notice, not alert/OK pairs
+                           cfg.intermittent.window_cycles, cfg.intermittent.min_failures,
+                           alerted=row.alerted_status in ("warn", "crit"), int_remind_hours=cfg.intermittent.remind_hours)
+            if fo.suppress and decision is not None and decision.kind in ("alert", "reminder", "recovered"):
+                # a flapping check gets the one [FLAPPING] notice, not alert/OK pairs. [BLIND] is never swallowed. The
+                # alert must not be remembered as sent when it is dropped here, or it could never be sent later.
+                if decision.kind in ("alert", "reminder"):
+                    row = dataclasses.replace(row, alerted_status=prev.alerted_status if prev else None,
+                                              last_alert_at=prev.last_alert_at if prev else None)
+                decision = None
+            if fo.decision and fo.decision[0] == "sustained" and decision is not None and decision.kind in ("alert", "reminder"):
+                decision = None   # the sustained-failure message is this cycle's alert; never send both
             if decision is not None:
                 cr.decisions.append(decision)
-            if fo.decision and (app, check) not in suppressed:
+            if fo.decision:
                 kind, lvl, detail = fo.decision
                 cr.decisions.append(AlertDecision(
                     kind, app, check, "crit" if lvl == "crit" else "warn", lvl, kind.upper(), detail, row.since,
-                    row.consecutive, row.alerted_status, row.last_alert_at))
+                    row.consecutive, prev.alerted_status if prev else None, prev.last_alert_at if prev else None,
+                    fo.undo))
+                if kind == "sustained":   # the real alert now going out puts the check back under normal alerting
+                    in_force = row.worst_status if row.worst_status in ("warn", "crit") else lvl
+                    row = dataclasses.replace(row, alerted_status=in_force, last_alert_at=int(now))
+            store.put_state(row)
         cr.worst = worst(r.status for r in cr.results.values())
         store.prune(now)
         store.finish_run(run_id, time.time(), True)
@@ -230,10 +244,12 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
 def rollback_alert_state(store: Store, d: AlertDecision) -> None:
     """No channel accepted the message: restore the pre-decision alert fields so the next cycle retries."""
     if d.kind in ("flapping", "stable", "intermittent", "sustained"):
-        # the flap module stamped its own state: undo it so the next cycle produces the decision again
-        flap.undo(store, d.app, d.check, d.kind, 12)
-        return
+        # the flap module stamped its own state: restore the exact previous values so the next cycle repeats it
+        flap.undo(store, d.app, d.check, d.kind, d.flap_undo)
     row = store.get_state(d.app, d.check)
     if row is not None:
+        extra = {}
+        if d.kind == "recovered":   # the [OK] reached nobody: the episode is still open until it does
+            extra = dict(recovered_at=None, ep_alerted=None, ep_last_alert=None, ok_notified=0)
         store.put_state(dataclasses.replace(row, alerted_status=d.prev_alerted_status,
-                                            last_alert_at=d.prev_last_alert_at))
+                                            last_alert_at=d.prev_last_alert_at, **extra))
