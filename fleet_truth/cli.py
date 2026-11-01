@@ -32,7 +32,7 @@ def _once(path: str) -> int:
             print(f"config error: {line}", file=sys.stderr)
         return 3
     try:
-        out = runtime.run_once(cfg)
+        out = runtime.run_once(cfg, config_path=path)
     except runtime.RunLocked:
         print("another fleet-truth run is in progress (run lock held); exiting without doing anything", file=sys.stderr)
         return 5

@@ -142,3 +142,32 @@ def test_check_config_warns_about_mnt_data_dir(tmp_path, capsys):
     f.write_text("data_dir: /mnt/c/fleet\napps: [{name: a, health: {url: 'https://a.example.com/'}}]\n")
     assert cli.main(["check-config", str(f)]) == 0
     assert "warning: data_dir is under /mnt/" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ review 2 R6: the marker survives a wiped data dir
+def test_wiping_the_whole_data_dir_is_detected(tmp_path):
+    import shutil
+    data = tmp_path / "data" / "ft"
+    cfg = config.parse({"apps": [{"name": "a", "health": {"url": "https://a.example.com/"}}], "alerts": [NTFY],
+                        "data_dir": str(data), "dead_man": {"url_env": "DM_URL"}})
+    first = Stub(body=b"{}")
+    runtime.run_once(cfg, runner_factory=R_ok, now=1000, fetch=first).store.close()
+    marker = runtime.marker_path(cfg)
+    assert marker.exists() and data not in marker.parents, "the marker must live outside the data dir"
+    shutil.rmtree(data)
+    stub = Stub(body=b"{}")
+    o = runtime.run_once(cfg, runner_factory=R_ok, now=2000, fetch=stub)
+    sent = [c["body"].decode() for c in stub.calls if "ntfy.sh" in c["url"]]
+    assert sent and sent[0].startswith("[RESET]") and "missing" in sent[0]
+    o.store.close()
+
+
+def test_marker_goes_next_to_the_config_file(tmp_path, monkeypatch):
+    conf = tmp_path / "etc" / "fleet.yaml"
+    conf.parent.mkdir()
+    conf.write_text(f"data_dir: {tmp_path / 'd'}\napps: [{{name: a, health: {{url: 'https://a.example.com/'}}}}]\n")
+    cfg = config.load(conf)
+    assert runtime.marker_path(cfg, conf).parent == conf.parent
+    monkeypatch.setattr(runtime, "Runner", R_ok)
+    assert cli.main(["once", "-c", str(conf)]) == 0
+    assert list(conf.parent.glob(".fleet-truth-*.initialized"))

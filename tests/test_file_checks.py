@@ -242,16 +242,91 @@ def test_grace_without_store_falls_back_to_lock_mtime(tmp_path):
         release(fd)
 
 
-def test_ok_status_is_never_replaced_by_lock_stuck(tmp_path):
+def test_fresh_ok_status_with_a_lock_held_beyond_the_grace_is_lock_stuck(tmp_path):
+    """Review 2 R6: the window starts when the lock is first SEEN held, whatever the status says."""
     write_status(tmp_path, **CASES["ok"])
     fd = held(tmp_path / "state")
     m = Meta()
     try:
-        F.backup_age(bcfg(tmp_path), NOW, meta_get=m.get_, meta_set=m.set_)
-        for k in range(1, 40):
-            assert F.backup_age(bcfg(tmp_path), NOW + k * 600, meta_get=m.get_, meta_set=m.set_).verdict == "OK"
+        r = F.backup_age(bcfg(tmp_path), NOW, meta_get=m.get_, meta_set=m.set_)
+        assert r.verdict == "OK" and m  # recorded the first sighting
+        assert F.backup_age(bcfg(tmp_path), NOW + 5 * 3600, meta_get=m.get_, meta_set=m.set_).verdict == "OK"
+        r = F.backup_age(bcfg(tmp_path), NOW + 7 * 3600, meta_get=m.get_, meta_set=m.set_)
+        assert (r.status, r.verdict) == ("crit", "LOCK_STUCK") and "7.0 hours" in r.detail and r.data["would_be"] == "OK"
     finally:
         release(fd)
+    assert F.backup_age(bcfg(tmp_path), NOW + 8 * 3600, meta_get=m.get_, meta_set=m.set_).verdict == "OK"   # released: cleared
+
+
+def test_wrong_app_and_unreadable_are_not_turned_into_lock_stuck(tmp_path):
+    write_status(tmp_path, **CASES["wrong_app"])
+    fd = held(tmp_path / "state")
+    m = Meta()
+    try:
+        F.backup_age(bcfg(tmp_path), NOW, meta_get=m.get_, meta_set=m.set_)
+        assert F.backup_age(bcfg(tmp_path), NOW + 20 * 3600, meta_get=m.get_, meta_set=m.set_).verdict == "WRONG_APP"
+    finally:
+        release(fd)
+
+
+# ------------------------------------------------------------------ review 2 R7: the probe never takes the lock
+def proc_locks_line(lockfile, kind="FLOCK", mode="WRITE"):
+    st = os.stat(lockfile)
+    return f"1: {kind}  ADVISORY  {mode} 4242 {os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino} 0 EOF\n"
+
+
+def test_lock_detection_reads_proc_locks_and_matches_device_and_inode(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "lock").write_text("")
+    other = tmp_path / "other"
+    other.write_text("")
+    f = tmp_path / "locks"
+    f.write_text("1: POSIX  ADVISORY  READ 1 00:00:1 0 EOF\n" + proc_locks_line(other))
+    assert F.lock_is_held(state, None, str(f)) is False                       # a lock on a different inode
+    f.write_text("garbage line\n1: FLOCK ADVISORY WRITE x notaninode 0 EOF\n" + proc_locks_line(state / "lock", "OFDLCK"))
+    assert F.lock_is_held(state, None, str(f)) is True
+    st = os.stat(state / "lock")
+    f.write_text(f"1: FLOCK  ADVISORY  WRITE 9 {(os.major(st.st_dev) + 1) % 256:02x}:{os.minor(st.st_dev):02x}:{st.st_ino} 0 EOF\n")
+    assert F.lock_is_held(state, None, str(f)) is False                       # right inode, wrong device
+
+
+def test_lock_detection_fallback_without_proc_locks(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "lock").write_text("")
+    assert F.lock_is_held(state, {"running": True}, str(tmp_path / "nope")) is True
+    assert F.lock_is_held(state, {"running": False}, str(tmp_path / "nope")) is False
+    assert F.lock_is_held(state, None, str(tmp_path / "nope")) is False
+    assert F.lock_is_held(tmp_path / "absent", {"running": True}, str(tmp_path / "nope")) is False
+
+
+def test_real_flock_held_by_another_process_is_seen_and_never_contended(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "lock").write_text("")
+    if not os.path.exists("/proc/locks"):
+        pytest.skip("no /proc/locks")
+    code = ("import fcntl,os,sys,time\n"
+            "fd=os.open(sys.argv[1],os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)\n"
+            "print('held',flush=True); time.sleep(30)\n")
+    p = subprocess.Popen([sys.executable, "-c", code, str(state / "lock")], stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "held"
+        assert F.lock_is_held(state) is True
+    finally:
+        p.kill()
+        p.wait()
+    assert F.lock_is_held(state) is False
+    # the probe itself never calls flock/lockf at all
+    def boom(*a, **k):
+        raise AssertionError("the monitor must never take the backup's lock")
+    monkeypatch.setattr(F.fcntl, "flock", boom, raising=False)
+    monkeypatch.setattr(F.fcntl, "lockf", boom, raising=False)
+    write_status(tmp_path, **CASES["ok"])
+    assert F.backup_age(bcfg(tmp_path), NOW).verdict == "OK"
 
 
 # ------------------------------------------------------------------ implausible status timestamps (review F3)

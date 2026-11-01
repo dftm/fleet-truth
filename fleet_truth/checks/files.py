@@ -32,22 +32,40 @@ def _read_status(path: Path) -> dict | None:
     return doc if isinstance(doc, dict) else None
 
 
-def lock_is_held(state_dir: Path) -> bool:
-    """True when another process holds the backup lock. Never creates the file: an absent lock is 'not held'."""
+PROC_LOCKS = "/proc/locks"
+
+
+def lock_is_held(state_dir: Path, status: dict | None = None, proc_locks: str = PROC_LOCKS) -> bool:
+    """True when some process holds a lock on <state_dir>/lock. The lock is NEVER acquired: the backup's own
+    RunLock takes LOCK_EX|LOCK_NB and a probe that briefly held it would make a simultaneous run exit 'locked'.
+
+    Linux: /proc/locks lists every flock/POSIX/OFD lock as `... FLOCK ADVISORY WRITE <pid> MM:mm:<inode> ...`
+    (device major:minor in hex, inode in decimal); we match the lock file's own device and inode.
+    Without /proc/locks (not Linux, restricted /proc) fall back to the status file's own `running: true`.
+    An absent lock file is 'not held' and is never created.
+    """
     p = state_dir / "lock"
     try:
-        fd = os.open(p, os.O_RDONLY)
+        st = p.stat()
     except OSError:
         return False
+    want_ino = st.st_ino
+    want_dev = (os.major(st.st_dev), os.minor(st.st_dev))
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except OSError:
-            return True
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        with open(proc_locks) as f:
+            for line in f:
+                parts = line.split()
+                for tok in parts:
+                    if tok.count(":") == 2:
+                        try:
+                            maj, mnr, ino = tok.split(":")
+                            if int(ino) == want_ino and (int(maj, 16), int(mnr, 16)) == want_dev:
+                                return True
+                        except ValueError:
+                            continue
         return False
-    finally:
-        os.close(fd)
+    except OSError:
+        return bool(status and status.get("running") is True)
 
 
 def _bad_epoch(v, now: float) -> str | None:
@@ -71,7 +89,7 @@ def running_grace_hours(cfg: BackupCfg, interval_s: float) -> float:
 
 
 def backup_age(cfg: BackupCfg, now: float | None = None, *, interval_s: float = 300.0,
-               meta_get=None, meta_set=None) -> CheckResult:
+               meta_get=None, meta_set=None, proc_locks: str = PROC_LOCKS) -> CheckResult:
     """Mirrors backup_lib._check_status verdict for verdict, then adds the bounded running-backup guard.
 
     A held lock masks NEVER_RAN/FAILED/STALE as `RUNNING` (info) only for `running_grace` hours, counted
@@ -110,34 +128,39 @@ def backup_age(cfg: BackupCfg, now: float | None = None, *, interval_s: float = 
         else:
             detail = f"ok, last success {age_h:.1f}h ago"
     key = f"lock_held_since:{path}"
-    held = lock_is_held(path.parent)
+    held = lock_is_held(path.parent, st, proc_locks)
     if not held:
         if meta_set and meta_get and meta_get(key):
             meta_set(key, "")
-    elif verdict in ("NEVER_RAN", "FAILED", "STALE"):
-        since = None
-        if meta_get:
-            try:
-                since = float(meta_get(key) or "") or None
-            except ValueError:
-                since = None
-        if since is None:
-            try:
-                since = (path.parent / "lock").stat().st_mtime if not meta_set else now
-            except OSError:
-                since = now
-            if meta_set:
-                meta_set(key, f"{now:.0f}")
-        held_h = max(0.0, (now - since) / 3600)
-        grace = running_grace_hours(cfg, interval_s)
-        data = {**data, "lock_held_h": round(held_h, 1), "would_be": verdict}
-        if held_h > grace:
-            return CheckResult("crit", "LOCK_STUCK",
-                               f"backup lock held for {held_h:.1f} hours (limit {grace:g}); "
-                               f"underlying status would read {verdict}: a hung backup is hiding it", data)
-        return CheckResult("info", "RUNNING", f"a backup run is in progress, lock held {held_h:.1f}h "
-                           f"(would otherwise read: {verdict})", data)
-    return CheckResult(status, verdict, detail, data)
+        return CheckResult(status, verdict, detail, data)
+    # The window starts when the lock is FIRST SEEN held, whatever the status says, so a hung backup with a
+    # fresh status is bounded too.
+    if verdict not in ("OK", "NEVER_RAN", "FAILED", "STALE"):
+        return CheckResult(status, verdict, detail, data)
+    since = None
+    if meta_get:
+        try:
+            since = float(meta_get(key) or "") or None
+        except ValueError:
+            since = None
+    if since is None:
+        try:
+            since = (path.parent / "lock").stat().st_mtime if not meta_set else now
+        except OSError:
+            since = now
+        if meta_set:
+            meta_set(key, f"{now:.0f}")
+    held_h = max(0.0, (now - since) / 3600)
+    grace = running_grace_hours(cfg, interval_s)
+    data = {**data, "lock_held_h": round(held_h, 1), "would_be": verdict}
+    if held_h > grace:
+        return CheckResult("crit", "LOCK_STUCK",
+                           f"backup lock held for {held_h:.1f} hours (limit {grace:g}); "
+                           f"underlying status would read {verdict}: a hung backup is hiding it", data)
+    if verdict == "OK":
+        return CheckResult(status, verdict, detail, data)
+    return CheckResult("info", "RUNNING", f"a backup run is in progress, lock held {held_h:.1f}h "
+                       f"(would otherwise read: {verdict})", data)
 
 
 def _s(v) -> str | None:

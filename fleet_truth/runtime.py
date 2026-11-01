@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import fcntl
+import hashlib
 import logging
 import os
 import time
@@ -70,7 +71,16 @@ def _move_aside(path: Path) -> Path:
     return dest
 
 
-def open_store_checked(cfg: cfgmod.Config) -> tuple[Store, str | None]:
+def marker_path(cfg: cfgmod.Config, config_path: str | Path | None = None) -> Path:
+    """The 'this install has run before' marker lives OUTSIDE the data dir (next to fleet.yaml, or next to the
+    data dir when no config path is known), so wiping the whole data dir is detected as a reset."""
+    d = Path(cfg.data_dir).expanduser()
+    base = Path(config_path).expanduser().resolve().parent if config_path else d.parent
+    tag = hashlib.sha1(str(d.resolve()).encode()).hexdigest()[:8]
+    return base / f".fleet-truth-{tag}.initialized"
+
+
+def open_store_checked(cfg: cfgmod.Config, config_path: str | Path | None = None) -> tuple[Store, str | None]:
     """Open the DB; returns (store, reset_note). A corrupt file is moved aside; a DB that vanished after a
     previous run (marker present) is reported too. The note is None for a normal open."""
     d = Path(cfg.data_dir).expanduser()
@@ -80,7 +90,7 @@ def open_store_checked(cfg: cfgmod.Config) -> tuple[Store, str | None]:
     except OSError:
         pass
     path = db_path(cfg)
-    marker = d / ".initialized"
+    marker = marker_path(cfg, config_path)
     note = None
     existed = path.exists()
     try:
@@ -94,7 +104,10 @@ def open_store_checked(cfg: cfgmod.Config) -> tuple[Store, str | None]:
             note = "database file was missing; history, alert de-duplication and channel health are reset"
     if note:
         store.meta_set("state_reset_at", str(int(time.time())))
-    marker.touch()
+    try:
+        marker.touch()
+    except OSError:
+        log.warning("cannot write the reset marker %s; a wiped data dir will not be flagged", marker.name)
     return store, note
 
 
@@ -120,7 +133,7 @@ class Outcome:
 
 def run_once(cfg: cfgmod.Config, *, runner_factory: Callable | None = None, now: float | None = None,
              deadline_s: float | None = None, fetch: Callable | None = None, senders: list | None = None,
-             get_secret: Callable[[str], str | None] = secrets.get) -> Outcome:
+             get_secret: Callable[[str], str | None] = secrets.get, config_path: str | Path | None = None) -> Outcome:
     """One cycle, then alerts, then the dead-man ping. A cycle error pings `/fail` and re-raises."""
     secrets.install_log_scrubber()
     fetch_fn = fetch or net.fetch
@@ -135,7 +148,7 @@ def run_once(cfg: cfgmod.Config, *, runner_factory: Callable | None = None, now:
         raise
     with stack:
         try:
-            store, reset_note = open_store_checked(cfg)
+            store, reset_note = open_store_checked(cfg, config_path)
         except Exception as e:
             alerts.dead_man_ping(cfg, cycle_ok=False, error_class=type(e).__name__, channels_healthy=False,
                                  fetch=fetch_fn, get_secret=get_secret)
