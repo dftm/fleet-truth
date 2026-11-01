@@ -813,10 +813,12 @@ def test_runtime_computes_clear_flags_from_the_whole_cycle(tmp_path, monkeypatch
         runtime.run_once(cfg, runner_factory=R, now=1000, fetch=fetch, senders=None).store.close()
         phase["a"] = "ok"
         srv.requests.clear()
-        runtime.run_once(cfg, runner_factory=R, now=1300, fetch=fetch).store.close()
+        for t in (1300, 1600):   # a recovers (two ok cycles); b is still crit
+            runtime.run_once(cfg, runner_factory=R, now=t, fetch=fetch).store.close()
         assert "/ping/base" not in [r.path for r in srv.requests], "b is still crit: the shared URL must stay red"
         phase["b"] = "ok"
-        runtime.run_once(cfg, runner_factory=R, now=1600, fetch=fetch).store.close()
+        for t in (1900, 2200):   # b needs two ok cycles too
+            runtime.run_once(cfg, runner_factory=R, now=t, fetch=fetch).store.close()
         assert [r.path for r in srv.requests if r.path == "/ping/base"] == ["/ping/base"]
     finally:
         srv.close()

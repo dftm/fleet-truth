@@ -1,41 +1,123 @@
-"""Flap detection (review F8): a check that alternates healthy/unhealthy every cycle never reaches `confirm`
-consecutive failures, so the normal flap guard stays silent forever. Count status flips per check in a
-sliding window and raise one rate-limited `flapping` warn."""
+"""Flap and intermittent-failure detection, per check (reviews F8, F2, F3).
+
+State lives in the `meta` table (one JSON blob per check), so it needs no schema of its own.
+
+FLAPPING. Every cycle's raw status is observed (cycles that also made an alert decision included). A flip is a
+healthy <-> unhealthy change. `flips` flips within `cycles` cycles declare the check flapping: ONE `flapping`
+decision goes out at the worst level seen (crit if any dip was crit), the check's individual alert, reminder,
+recovery and blind decisions are suppressed, and `flapping` repeats at `remind_hours`. When the check has been
+healthy for `clear_cycles` cycles in a row one `stable` notice ends it.
+
+INTERMITTENT. A check that fails once in a while but never long enough to confirm is counted by failure
+EPISODES (a long outage is one) in a rolling window of max(24 h, window_cycles x interval); `min_failures` of them
+raise ONE `intermittent` decision (crit if any failure was crit), repeating at the normal reminder interval while
+the rate stays above the threshold and cleared when the window is clean. It stays quiet while the check is
+flapping (that notice already covers it).
+"""
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from .store import Store
 
 GOOD = ("ok", "info")
+REMIND_S = {"crit": 6 * 3600, "warn": 24 * 3600}
+
+
+@dataclass(frozen=True)
+class Outcome:
+    suppress: bool                       # drop this check's alert/reminder/recovered/blind decisions this cycle
+    decision: tuple | None = None        # (kind, level, detail)
 
 
 def _key(app: str, check: str) -> str:
-    return f"flips:{app}:{check}"
+    return f"fl:{app}:{check}"
 
 
-def observe(store: Store, app: str, check: str, prev_status: str | None, status: str, now: float,
-            window_s: float, flips: int, remind_s: float) -> tuple[int, str] | None:
-    """Record a possible healthy<->unhealthy flip; return (flip count, level) when a flapping alert is due.
-    The level is crit if any unhealthy side seen in the window was crit (never downgrade a crit)."""
-    if prev_status is None:
-        return None
-    key = _key(app, check)
+def _load(store: Store, app: str, check: str) -> dict:
     try:
-        hist = [e for e in json.loads(store.meta_get(key) or "[]") if isinstance(e, list) and now - e[0] <= window_s]
-    except (ValueError, TypeError, IndexError):
-        hist = []
-    if (prev_status in GOOD) != (status in GOOD):
-        hist.append([int(now), prev_status if status in GOOD else status])
-    store.meta_set(key, json.dumps(hist))
-    if len(hist) < flips:
-        return None
-    try:
-        last = float(store.meta_get("flap_alerted:" + key) or 0)
+        st = json.loads(store.meta_get(_key(app, check)) or "{}")
     except ValueError:
-        last = 0.0
-    if last and now - last < remind_s:
-        return None
-    level = "crit" if any(e[1] == "crit" for e in hist) else "warn"
-    store.meta_set("flap_alerted:" + key, f"{now:.0f}")
-    return len(hist), level
+        st = {}
+    if not isinstance(st, dict):
+        st = {}
+    st.setdefault("flips", [])
+    st.setdefault("fails", [])
+    st.setdefault("flapping", False)
+    st.setdefault("worst", "warn")
+    st.setdefault("clear", 0)
+    st.setdefault("last_alert", 0)
+    st.setdefault("int_alert", 0)
+    return st
+
+
+def _save(store: Store, app: str, check: str, st: dict) -> None:
+    store.meta_set(_key(app, check), json.dumps(st))
+
+
+def step(store: Store, app: str, check: str, prev_status: str | None, status: str, now: float, interval_s: float,
+         flips: int, cycles: int, remind_hours: float, clear_cycles: int,
+         window_cycles: int, min_failures: int) -> Outcome:
+    st = _load(store, app, check)
+    window = cycles * interval_s
+    hist = [e for e in st["flips"] if now - e[0] <= window]
+    if prev_status is not None and (prev_status in GOOD) != (status in GOOD):
+        hist.append([int(now), prev_status if status in GOOD else status])
+    st["flips"] = hist
+    decision = None
+    remind_s = remind_hours * 3600
+
+    # failure episodes for the intermittent rule (recorded always, evaluated only when not flapping)
+    iwindow = max(86400.0, window_cycles * interval_s)
+    fails = [e for e in st["fails"] if now - e[0] <= iwindow]
+    if status in GOOD:
+        st["run_counted"] = False
+    elif status in ("warn", "crit") and not st.get("run_counted"):
+        fails.append([int(now), status])      # one entry per run of bad cycles, however its statuses mix
+        st["run_counted"] = True
+    st["fails"] = fails
+
+    if not st["flapping"]:
+        if len(hist) >= flips:
+            lvl = "crit" if any(e[1] == "crit" for e in hist) else "warn"
+            st.update(flapping=True, worst=lvl, clear=0, last_alert=int(now))
+            decision = ("flapping", lvl, f"changed state {len(hist)} times in the last {cycles} cycles; individual alerts "
+                                         f"for this check are paused until it stays ok for {clear_cycles} cycles")
+    else:
+        if status == "crit":
+            st["worst"] = "crit"
+        st["clear"] = st["clear"] + 1 if status in GOOD else 0
+        if st["clear"] >= clear_cycles:
+            decision = ("stable", st["worst"], f"stable again: ok for {clear_cycles} cycles in a row; normal alerting resumed")
+            st.update(flapping=False, flips=[], clear=0, last_alert=0)
+            hist = []
+        elif now - st["last_alert"] >= remind_s:
+            st["last_alert"] = int(now)
+            decision = ("flapping", st["worst"], f"still flapping ({len(hist)} state changes in the last {cycles} cycles)")
+
+    if decision is None and not st["flapping"]:
+        n = len(fails)
+        if n == 0:
+            st["int_alert"] = 0
+        elif n >= min_failures:
+            lvl = "crit" if any(e[1] == "crit" for e in fails) else "warn"
+            if not st["int_alert"] or now - st["int_alert"] >= REMIND_S[lvl]:
+                st["int_alert"] = int(now)
+                hours = iwindow / 3600
+                decision = ("intermittent", lvl, f"{n} separate failures in the last {hours:.0f} h "
+                                                 f"(last at {int(fails[-1][0])}); each was too short to confirm")
+    _save(store, app, check, st)
+    return Outcome(st["flapping"], decision)
+
+
+def undo(store: Store, app: str, check: str, kind: str, clear_cycles: int) -> None:
+    """No channel heard the decision: make the next cycle produce it again."""
+    st = _load(store, app, check)
+    if kind == "flapping":
+        st["last_alert"] = 0
+    elif kind == "intermittent":
+        st["int_alert"] = 0
+    elif kind == "stable":
+        st.update(flapping=True, clear=max(clear_cycles - 1, 0))
+    _save(store, app, check, st)

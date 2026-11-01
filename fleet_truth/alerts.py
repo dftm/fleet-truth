@@ -83,7 +83,13 @@ def format_message(d: AlertDecision, url: str, cycle_clear: bool = True, app_cle
         head = f"[OK] {d.app} {d.check}: recovered"
         body = f"{d.verdict}"
     elif d.kind == "flapping":
-        head = f"[WARN] {d.app} {d.check}: flapping"
+        head = f"[{'CRIT ' if d.level == 'crit' else ''}FLAPPING] {d.app} {d.check}"
+        body = d.detail
+    elif d.kind == "stable":
+        head = f"[STABLE] {d.app} {d.check}"
+        body = d.detail
+    elif d.kind == "intermittent":
+        head = f"[INTERMITTENT] {d.app} {d.check}" + (" (crit)" if d.level == "crit" else "")
         body = d.detail
     elif d.kind == "reset":
         head = "[RESET] Fleet Truth state was reset"

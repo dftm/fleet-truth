@@ -7,13 +7,13 @@ from fleet_truth.state import advance
 STEP = 300
 
 
-def drive(seq, confirm=2, step=STEP, t0=1_000_000):
+def drive(seq, confirm=2, step=STEP, t0=1_000_000, **kw):
     """seq: list of status strings or (status, verdict). Returns [(t, kind or None)] and final row."""
     row, out = None, []
     for i, item in enumerate(seq):
         status, verdict = item if isinstance(item, tuple) else (item, "V")
         now = t0 + i * step
-        row, d = advance(row, "app", "CHK", CheckResult(status, verdict, "d"), now, confirm)
+        row, d = advance(row, "app", "CHK", CheckResult(status, verdict, "d"), now, confirm, **kw)
         out.append((now - t0, d.kind if d else None))
     return out, row
 
@@ -28,7 +28,7 @@ def test_fail_fail_one_alert():
 
 
 def test_fail_then_ok_no_alert_at_all():
-    out, _ = drive(["crit", "ok", "crit", "ok", "warn", "ok"])
+    out, _ = drive(["crit", "ok", "crit", "ok", "warn", "ok"], recover_after=1)
     assert kinds(out) == []
 
 
@@ -54,22 +54,22 @@ def test_warn_reminds_daily_not_6h():
 
 
 def test_recovery_once_immediately_then_silence():
-    out, row = drive(["crit", "crit", "crit", "ok", "ok", "ok"])
+    out, row = drive(["crit", "crit", "crit", "ok", "ok", "ok"], recover_after=1)
     assert kinds(out) == ["alert", "recovered"]
     assert out[3][1] == "recovered" and row.alerted_status is None
-    out2, _ = drive(["crit", "crit", "info", "info"])
+    out2, _ = drive(["crit", "crit", "info", "info"], recover_after=1)
     assert kinds(out2) == ["alert", "recovered"]  # info counts as healthy
 
 
 def test_recovery_level_matches_what_was_alerted():
     row = None
-    for i, s in enumerate(["warn", "warn", "ok"]):
+    for i, s in enumerate(["warn", "warn", "ok", "ok"]):
         row, d = advance(row, "a", "c", CheckResult(s, "V", "d"), i * STEP, 2)
     assert d.kind == "recovered" and d.level == "warn"
 
 
 def test_blip_does_not_arm_a_recovery():
-    out, _ = drive(["crit", "ok", "crit", "ok", "ok"])
+    out, _ = drive(["crit", "ok", "crit", "ok", "ok"], recover_after=1)
     assert kinds(out) == []
 
 
@@ -104,12 +104,12 @@ def test_blind_alert_is_worded_unknown_level_warn():
 
 
 def test_unknown_flapping_with_ok_never_alerts():
-    out, _ = drive(["unknown", "unknown", "ok", "unknown", "unknown", "ok"] * 3)
-    assert kinds(out) == []
+    out, _ = drive(["unknown", "unknown", "ok", "ok", "unknown", "unknown", "ok", "ok"] * 3)
+    assert kinds(out) == []   # two ok cycles end each episode, so no run reaches 30 minutes
 
 
 def test_recovery_from_blind():
-    out, _ = drive(["unknown"] * 8 + ["ok"])
+    out, _ = drive(["unknown"] * 8 + ["ok", "ok"])
     assert kinds(out) == ["blind", "recovered"]
 
 
@@ -166,10 +166,10 @@ def test_unknown_time_counts_toward_blind_timer_even_after_a_warn_blip_free_run(
 
 
 def test_genuine_recovery_ends_the_episode_and_a_new_one_starts_clean():
-    out, row = decisions(["crit", "unknown", "ok", "unknown", "unknown"])
+    out, row = decisions(["crit", "unknown", "ok", "ok", "unknown", "unknown"])
     assert [d.kind for _, d in out] == ["alert", "recovered"]
-    assert row.unhealthy_cycles == 2 and row.worst_status == "unknown"   # the new episode did not inherit crit
-    out, _ = decisions(["crit", "unknown", "ok", "unknown", "unknown", "crit"])
+    assert row.unhealthy_cycles == 4 and row.worst_status == "crit" and row.ok_notified == 1   # re-opened within the cooldown: same episode
+    out, _ = decisions(["crit", "unknown", "ok", "ok", "unknown", "unknown", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "ok", "crit", "crit"])
     assert [d.kind for _, d in out] == ["alert", "recovered", "alert"]
 
 
@@ -178,6 +178,50 @@ def test_blind_then_crit_in_the_same_episode_alerts_crit():
     assert [d.kind for _, d in out] == ["blind", "alert"] and out[1][1].level == "crit"
 
 
-def test_oscillation_with_ok_still_does_not_confirm():
-    out, _ = decisions(["crit", "ok"] * 10)
+def test_single_blips_separated_by_two_ok_cycles_never_confirm():
+    out, _ = decisions(["crit", "ok", "ok"] * 10)
+    assert out == []
+    out, _ = decisions(["crit", "ok"] * 10, recover_after=1)
+    assert out == []
+
+
+# ------------------------------------------------------------------ review 3 F2: hysteresis against alert storms
+def day(pattern, **kw):
+    return decisions(pattern * (288 // len(pattern) + 1), **kw)[0]
+
+
+def test_crit_crit_ok_repeating_is_one_episode_not_96_pairs():
+    for pat in (["crit", "crit", "ok"], ["crit", "unknown", "ok"], ["crit", "warn", "ok"]):
+        out = day(pat)
+        kinds = [d.kind for _, d in out]
+        assert kinds.count("alert") == 1 and "recovered" not in kinds, pat
+        assert len(out) <= 1 + 24 // 6 + 1, (pat, len(out))     # alert + one reminder per 6 h
+
+
+def test_recovery_needs_recover_after_consecutive_ok_cycles():
+    out, _ = decisions(["crit", "crit", "ok", "ok"])
+    assert [d.kind for _, d in out] == ["alert", "recovered"] and out[1][0] == 3
+    out, _ = decisions(["crit", "crit", "ok", "ok", "ok"], recover_after=3)
+    assert [d.kind for _, d in out] == ["alert", "recovered"] and out[1][0] == 4
+    out, _ = decisions(["crit", "crit", "ok", "crit", "ok", "crit"], recover_after=2)
+    assert [d.kind for _, d in out] == ["alert"]      # a lone ok never ends it
+
+
+def test_a_failure_within_the_cooldown_after_recovery_continues_the_same_episode():
+    # crit,crit alert; ok,ok recover; crit again 5 min later: no second CRIT, and the later recovery is silent
+    out, row = decisions(["crit", "crit", "ok", "ok", "crit", "crit", "ok", "ok"])
+    assert [d.kind for _, d in out] == ["alert", "recovered"], "one pair only"
+    assert row.recovered_at is not None
+    day_out = day(["crit", "crit", "ok", "ok"])
+    assert [d.kind for _, d in day_out].count("alert") == 1 and [d.kind for _, d in day_out].count("recovered") == 1
+
+
+def test_after_the_cooldown_a_new_episode_alerts_again():
+    seq = ["crit", "crit", "ok", "ok"] + ["ok"] * 8 + ["crit", "crit", "ok", "ok"]   # 40 min between episodes
+    out, _ = decisions(seq)
+    assert [d.kind for _, d in out] == ["alert", "recovered", "alert", "recovered"]
+
+
+def test_an_unalerted_blip_never_reopens():
+    out, _ = decisions(["crit", "ok", "ok", "crit", "ok", "ok"])
     assert out == []

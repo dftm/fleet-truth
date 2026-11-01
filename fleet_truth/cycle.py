@@ -196,24 +196,25 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
         for (app, check), res in cr.results.items():
             store.add_result(run_id, app, check, res, now)
             prev = store.get_state(app, check)
-            row, decision = advance(prev, app, check, res, now, cfg.confirm, cfg.blind_level)
+            reopen_s = max(1800.0, cfg.reopen_cooldown_cycles * cfg.interval_seconds)
+            row, decision = advance(prev, app, check, res, now, cfg.confirm, cfg.blind_level, cfg.recover_after, reopen_s)
             if (app, check) in suppressed and decision is not None:
                 row = dataclasses.replace(row, alerted_status=prev.alerted_status if prev else None,
                                           last_alert_at=prev.last_alert_at if prev else None)
                 decision = None
             store.put_state(row)
+            fo = flap.step(store, app, check, prev.status if prev else None, res.status, now, cfg.interval_seconds,
+                           cfg.flap.flips, cfg.flap.cycles, cfg.flap.remind_hours, cfg.flap.clear_cycles,
+                           cfg.intermittent.window_cycles, cfg.intermittent.min_failures)
+            if fo.suppress:
+                decision = None   # a flapping check gets the one [FLAPPING] notice, not alert/OK pairs
             if decision is not None:
                 cr.decisions.append(decision)
-            elif (app, check) not in suppressed:
-                n = flap.observe(store, app, check, prev.status if prev else None, res.status, now,
-                                 cfg.flap.cycles * cfg.interval_seconds, cfg.flap.flips, cfg.flap.remind_hours * 3600)
-                if n:
-                    n, lvl = n
-                    cr.decisions.append(AlertDecision(
-                        "flapping", app, check, "warn", lvl, "FLAPPING",
-                        f"changed state {n} times in the last {cfg.flap.cycles} cycles; each dip is too short to confirm, "
-                        f"so no failure alert fires (latest: {res.verdict})", row.since, row.consecutive,
-                        row.alerted_status, row.last_alert_at))
+            if fo.decision and (app, check) not in suppressed:
+                kind, lvl, detail = fo.decision
+                cr.decisions.append(AlertDecision(
+                    kind, app, check, "crit" if lvl == "crit" else "warn", lvl, kind.upper(), detail, row.since,
+                    row.consecutive, row.alerted_status, row.last_alert_at))
         cr.worst = worst(r.status for r in cr.results.values())
         store.prune(now)
         store.finish_run(run_id, time.time(), True)
@@ -225,8 +226,9 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
 
 def rollback_alert_state(store: Store, d: AlertDecision) -> None:
     """No channel accepted the message: restore the pre-decision alert fields so the next cycle retries."""
-    if d.kind == "flapping":  # flap.observe stamped the rate limit before dispatch: undo it so the next cycle retries
-        store.meta_set(f"flap_alerted:flips:{d.app}:{d.check}", "0")
+    if d.kind in ("flapping", "stable", "intermittent"):  # the flap module stamped its rate limit: undo it, retry next cycle
+        flap.undo(store, d.app, d.check, d.kind, 12)
+        return
     row = store.get_state(d.app, d.check)
     if row is not None:
         store.put_state(dataclasses.replace(row, alerted_status=d.prev_alerted_status,

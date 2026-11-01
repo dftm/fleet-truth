@@ -43,6 +43,19 @@ MIGRATIONS = [
     ALTER TABLE check_state ADD COLUMN worst_status TEXT;
     ALTER TABLE check_state ADD COLUMN worst_verdict TEXT;
     """,
+    # version 3: recovery hysteresis and episode re-opening. Rows written before the episode columns existed
+    # (unhealthy_since NULL while the check is not healthy) get their episode reconstructed so an open episode
+    # does not restart (and re-alert at a different level) after an upgrade.
+    """
+    ALTER TABLE check_state ADD COLUMN ok_streak INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE check_state ADD COLUMN recovered_at INTEGER;
+    ALTER TABLE check_state ADD COLUMN ep_alerted TEXT;
+    ALTER TABLE check_state ADD COLUMN ep_last_alert INTEGER;
+    ALTER TABLE check_state ADD COLUMN ok_notified INTEGER NOT NULL DEFAULT 0;
+    UPDATE check_state SET unhealthy_since = since, unhealthy_cycles = MAX(consecutive, 1),
+        worst_status = status, worst_verdict = verdict
+      WHERE unhealthy_since IS NULL AND status NOT IN ('ok','info');
+    """,
 ]
 
 
@@ -69,12 +82,18 @@ class StateRow:
     unhealthy_cycles: int = 0            # non-healthy cycles in the episode, any mix of crit/warn/unknown
     worst_status: str | None = None      # worst of crit > warn > unknown seen in the episode
     worst_verdict: str | None = None
+    ok_streak: int = 0                   # consecutive healthy cycles (recovery needs `recover_after` of them)
+    recovered_at: int | None = None      # when the episode ended; None while it is open
+    ep_alerted: str | None = None        # alert level in force when it ended (restored if it re-opens)
+    ep_last_alert: int | None = None
+    ok_notified: int = 0                 # an [OK] was already sent for this (re-opened) episode
 
 
 def _row(r) -> "StateRow":
     return StateRow(r["app"], r["check_name"], r["status"], r["verdict"], r["since"], r["consecutive"],
                     r["alerted_status"], r["last_alert_at"], r["silenced_until"], r["unhealthy_since"],
-                    r["unhealthy_cycles"], r["worst_status"], r["worst_verdict"])
+                    r["unhealthy_cycles"], r["worst_status"], r["worst_verdict"], r["ok_streak"], r["recovered_at"],
+                    r["ep_alerted"], r["ep_last_alert"], r["ok_notified"])
 
 
 def _cap_json(data: dict) -> str:
@@ -154,10 +173,12 @@ class Store:
         with self._lock:
             self.db.execute(
                 "INSERT OR REPLACE INTO check_state(app,check_name,status,verdict,since,consecutive,alerted_status,"
-                "last_alert_at,silenced_until,unhealthy_since,unhealthy_cycles,worst_status,worst_verdict)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "last_alert_at,silenced_until,unhealthy_since,unhealthy_cycles,worst_status,worst_verdict,"
+                "ok_streak,recovered_at,ep_alerted,ep_last_alert,ok_notified)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (s.app, s.check, s.status, s.verdict, s.since, s.consecutive, s.alerted_status, s.last_alert_at,
-                 s.silenced_until, s.unhealthy_since, s.unhealthy_cycles, s.worst_status, s.worst_verdict))
+                 s.silenced_until, s.unhealthy_since, s.unhealthy_cycles, s.worst_status, s.worst_verdict,
+                 s.ok_streak, s.recovered_at, s.ep_alerted, s.ep_last_alert, s.ok_notified))
 
     def all_states(self) -> list[StateRow]:
         with self._lock:
