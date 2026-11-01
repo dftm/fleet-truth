@@ -25,6 +25,8 @@ GITHUB_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/-]{0,100}$")
 # keys that look like they hold a literal secret
 SECRET_KEY_RE = re.compile(r"(^|_)(token|secret|password|passwd|apikey|api_key|passphrase)(_|$)", re.I)
+DEAD_MAN_PING_S = 10.0
+MIN_CHECK_DEADLINE_S = 30.0
 MIN_STATUSES = ("info", "warn", "crit")
 ALERT_TYPES = ("telegram", "ntfy", "email", "webhook")
 
@@ -198,6 +200,12 @@ class Config:
     offline_suppress_cycles: int = 2       # max cycles 'monitor offline' may suppress app alerts
     blind_level: str = "crit"           # level of 'monitor cannot judge' alerts, compared with channel min_status
     reference_urls: tuple[str, ...] = ()  # independent public URLs used to tell 'monitor offline' from 'fleet down'
+
+    @property
+    def check_deadline_s(self) -> float:
+        """Hard deadline for the checks: 80% of the interval, but never so late that the alert budget and the
+        dead-man ping no longer fit inside 90% of it (otherwise the next run finds the lock still held)."""
+        return min(0.8 * self.interval_seconds, 0.9 * self.interval_seconds - self.alert_budget_seconds - DEAD_MAN_PING_S)
 
     def env_names(self) -> list[str]:
         """Every env var NAME this config refers to, in first-seen order."""
@@ -665,6 +673,14 @@ def parse(data: Any) -> Config:
                         "auth: access needs credentials.access_client_id_env and access_client_secret_env")
                 break
 
+    room = 0.9 * interval - budget - DEAD_MAN_PING_S
+    if room < MIN_CHECK_DEADLINE_S and not ctx.errors:
+        import math
+        ctx.err("interval_seconds", f"0.9 x interval ({0.9 * interval:.0f}s) minus alert_budget_seconds ({budget:g}s) minus the "
+                f"{DEAD_MAN_PING_S:g}s dead-man ping leaves {room:.0f}s for checks; at least {MIN_CHECK_DEADLINE_S:g}s is needed "
+                f"or a slow cycle makes the next run find the lock held. Suggest alert_budget_seconds <= "
+                f"{max(1, math.floor(0.9 * interval - DEAD_MAN_PING_S - MIN_CHECK_DEADLINE_S))} or interval_seconds >= "
+                f"{math.ceil((budget + DEAD_MAN_PING_S + MIN_CHECK_DEADLINE_S) / 0.9)}")
     if ctx.errors:
         raise ConfigError(ctx.errors)
     cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), flap, intermittent, recover_after, reopen_cycles, budget, chan_budget, backoff_cycles, off_cycles, blind_level, tuple(refs))

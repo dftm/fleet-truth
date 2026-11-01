@@ -1,5 +1,6 @@
 """Review F6/F7: corrupt or wiped DB, run lock."""
 import fcntl
+import time
 import os
 
 import pytest
@@ -209,3 +210,112 @@ def test_corrupt_copies_are_capped_and_the_first_is_never_deleted(tmp_path):
     contents = [p.read_bytes() for p in copies]
     assert contents[0].startswith(b"corrupt generation 0"), "the first corrupt copy is kept for good"
     assert contents[-1].startswith(b"corrupt generation 6") and contents[-2].startswith(b"corrupt generation 5")
+
+
+# ------------------------------------------------------------------ review 3 F6b: deadlines fit, stale runs are reported
+def test_config_deadlines_must_fit_inside_the_interval():
+    base = {"apps": [{"name": "a"}]}
+    c = config.parse(base)
+    assert c.check_deadline_s == min(0.8 * 300, 0.9 * 300 - 60 - 10) == 200.0
+    assert config.parse({**base, "interval_seconds": 3600}).check_deadline_s == 0.8 * 3600
+    with pytest.raises(config.ConfigError) as e:
+        config.parse({**base, "interval_seconds": 90})
+    msg = e.value.errors[0]
+    assert "(81s)" in msg and "(60s)" in msg and "leaves 11s" in msg and "dead-man" in msg
+    assert "Suggest alert_budget_seconds <= 41" in msg
+    assert "interval_seconds >= 112" in msg
+    assert config.parse({**base, "interval_seconds": 120, "alert_budget_seconds": 60 - 40}).check_deadline_s == 78
+    with pytest.raises(config.ConfigError):
+        config.parse({**base, "interval_seconds": 300, "alert_budget_seconds": 240})
+
+
+def test_a_cycle_uses_the_effective_deadline(tmp_path):
+    from fleet_truth import cycle
+    from fleet_truth.store import Store
+    seen = []
+    orig = cycle._run_apps
+    cfg = config.parse({"apps": [{"name": "a", "health": {"url": "https://a.example.com/"}}], "data_dir": str(tmp_path)})
+    cycle._run_apps = lambda cfg_, rn, now, dl, w: (seen.append(dl), orig(cfg_, rn, now, dl, w))[1]
+    try:
+        cycle.run_cycle(cfg, Store(tmp_path / "x.db"), R_ok(), now=1000)
+    finally:
+        cycle._run_apps = orig
+    assert seen == [200.0]
+
+
+def test_stale_lock_holder_is_reported_to_the_dead_man_once(tmp_path, monkeypatch):
+    cfg = dm_cfg(tmp_path, NTFY)
+    d = tmp_path
+    fd = os.open(d / "run.lock", os.O_CREAT | os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        os.write(fd, f"4242 {int(time.time()) - 700}\n".encode())     # started 700 s ago; interval 300 -> stale after 600
+        stub = Stub()
+        with pytest.raises(runtime.RunLocked):
+            runtime.run_once(cfg, runner_factory=R_ok, fetch=stub)
+        assert [c["url"] for c in stub.calls] == ["https://hc.example.com/ping/SEKRIT-dm/fail"]
+        assert b"StaleRun" in stub.calls[0]["body"]
+        stub2 = Stub()
+        with pytest.raises(runtime.RunLocked):
+            runtime.run_once(cfg, runner_factory=R_ok, fetch=stub2)
+        assert stub2.calls == [], "reported once per stuck run, not on every attempt"
+        # a young lock holder is a normal overlap: nothing is sent
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, 0)
+        os.write(fd, f"4242 {int(time.time()) - 30}\n".encode())
+        (d / "run.lock.stale-reported").unlink()
+        stub3 = Stub()
+        with pytest.raises(runtime.RunLocked):
+            runtime.run_once(cfg, runner_factory=R_ok, fetch=stub3)
+        assert stub3.calls == []
+    finally:
+        os.close(fd)
+
+
+def test_lock_file_records_pid_and_start_time(tmp_path):
+    cfg = dm_cfg(tmp_path, NTFY)
+    with runtime.run_lock(cfg):
+        pid, started = (tmp_path / "run.lock").read_text().split()
+        assert int(pid) == os.getpid() and abs(int(started) - time.time()) < 5
+
+
+# ------------------------------------------------------------------ review 3 F6c: test-alert is polite and harmless
+def test_test_alert_refuses_politely_when_a_run_holds_the_lock(tmp_path, capsys):
+    f = tmp_path / "fleet.yaml"
+    f.write_text(f"data_dir: {tmp_path / 'd'}\napps: [{{name: a, health: {{url: 'https://a.example.com/'}}}}]\n"
+                 "alerts:\n  - {type: ntfy, topic_env: NTFY_TOPIC}\n")
+    (tmp_path / "d").mkdir()
+    fd = os.open(tmp_path / "d" / "run.lock", os.O_CREAT | os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    stub = Stub(body=b"{}")
+    real = runtime.test_alerts
+    try:
+        import pytest as _p
+        mp = _p.MonkeyPatch()
+        mp.setattr(runtime, "test_alerts", lambda cfg, **kw: real(cfg, fetch=stub, **kw))
+        assert cli.main(["test-alert", "-c", str(f)]) == 5
+        assert "run is in progress" in capsys.readouterr().err and stub.calls == []
+        mp.undo()
+    finally:
+        os.close(fd)
+
+
+def test_test_alert_never_moves_or_replaces_a_live_database(tmp_path, capsys, monkeypatch):
+    f = tmp_path / "fleet.yaml"
+    data = tmp_path / "d"
+    f.write_text(f"data_dir: {data}\napps: [{{name: a, health: {{url: 'https://a.example.com/'}}}}]\n"
+                 "alerts:\n  - {type: ntfy, topic_env: NTFY_TOPIC}\n")
+    data.mkdir()
+    db = data / "fleet-truth.db"
+    junk = b"not a database at all" * 30
+    db.write_bytes(junk)
+    stub = Stub(body=b"{}")
+    real = runtime.test_alerts
+    monkeypatch.setattr(runtime, "test_alerts", lambda cfg, **kw: real(cfg, fetch=stub, **kw))
+    assert cli.main(["test-alert", "-c", str(f)]) == 0
+    assert "ntfy: ok" in capsys.readouterr().out and len(stub.calls) == 1
+    assert db.read_bytes() == junk and not [p for p in data.iterdir() if "corrupt" in p.name]
+    # a healthy DB is opened, recorded into, and stays the same file
+    db.unlink()
+    assert cli.main(["test-alert", "-c", str(f)]) == 0
+    assert db.exists() and not [p for p in data.iterdir() if "corrupt" in p.name]

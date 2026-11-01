@@ -174,7 +174,7 @@ def correlate(cfg: Config, results: dict, reference: Callable[[], bool | None] |
 def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
               now_fn: Callable[[], float] = time.time, deadline_s: float | None = None, workers: int = 4) -> CycleResult:
     now = now_fn() if now is None else now
-    deadline = cfg.interval_seconds * 0.8 if deadline_s is None else deadline_s
+    deadline = cfg.check_deadline_s if deadline_s is None else deadline_s
     run_id = store.start_run(now)
     cr = CycleResult(run_id, now)
     try:

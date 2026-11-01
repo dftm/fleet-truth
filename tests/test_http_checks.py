@@ -291,3 +291,18 @@ def test_tls_expiry_verification_failure_is_crit(tmp_path):
         assert (blocked.status, blocked.verdict) == ("unknown", "BLOCKED_TARGET")
     finally:
         srv.close()
+
+
+# ------------------------------------------------------------------ review 3 F6a: allow_loopback never reaches tls.host
+def test_tls_host_is_never_covered_by_allow_loopback():
+    app = mkapp(health={"url": "http://127.0.0.1:8790/healthz", "allow_loopback": True}, tls={"host": "127.0.0.1:22"})
+    calls = []
+    r = H.tls_expiry(app, cert_fn=lambda url, **kw: calls.append((url, kw)) or (_ for _ in ()).throw(net.FetchError("BLOCKED", "x")))
+    assert calls == [("https://127.0.0.1:22/", {"allow_private": False})], "no allow_loopback passed for a tls.host"
+    real = H.tls_expiry(app)       # the real fetcher: refused before any socket (a connect would raise the test guard)
+    assert (real.status, real.verdict) == ("unknown", "BLOCKED_TARGET")
+    # the health URL itself (no tls.host) keeps the flag
+    app2 = mkapp(health={"url": "https://localhost:8443/healthz", "allow_loopback": True})
+    calls.clear()
+    H.tls_expiry(app2, cert_fn=lambda url, **kw: calls.append(kw) or ("127.0.0.1", time.time() + 90 * 86400))
+    assert calls == [{"allow_private": False, "allow_loopback": True}]

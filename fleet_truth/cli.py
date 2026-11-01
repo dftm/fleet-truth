@@ -65,7 +65,14 @@ def _test_alert(path: str) -> int:
     if not cfg.alerts:
         print("no alert channels configured", file=sys.stderr)
         return 1
-    res = runtime.test_alerts(cfg)
+    try:
+        res = runtime.test_alerts(cfg)
+    except runtime.RunLocked:
+        print("a run is in progress (run lock held); try test-alert again in a minute", file=sys.stderr)
+        return 5
+    except runtime.LockError as e:
+        print(f"lock error: {e}", file=sys.stderr)
+        return 4
     for name, r in res.items():
         print(f"{name}: ok" if r.ok else f"{name}: failed ({r.error})")
     return 0 if all(r.ok for r in res.values()) else 1

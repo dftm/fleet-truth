@@ -160,7 +160,8 @@ def tls_expiry(app: App, now: float | None = None, cert_fn: Callable[..., tuple]
     else:
         return CheckResult("unknown", "NOT_CONFIGURED", "no https URL or tls.host to check")
     try:
-        lo = bool(app.health and app.health.allow_loopback)
+        # allow_loopback belongs to the health/version URL probes only: a tls.host is never covered by it
+        lo = bool(app.health and app.health.allow_loopback and not host_port)
         ip, not_after = cert_fn(url, allow_private=allow_private, **({"allow_loopback": True} if lo else {}))
     except net.FetchError as e:
         if e.kind == "BLOCKED":

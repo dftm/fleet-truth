@@ -51,9 +51,37 @@ def run_lock(cfg: cfgmod.Config):
             log.error("run lock failed on %s: %s", d / "run.lock", name)
             raise LockError(f"cannot take the run lock in {d} ({name}); keep data_dir on the Linux filesystem, "
                             "not on /mnt/c (drvfs/9p/NFS may not support flock)") from None
+        try:  # who holds it and since when, for stale-run detection
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()} {int(time.time())}\n".encode())
+        except OSError:
+            pass
         yield
     finally:
         os.close(fd)  # closing releases the flock
+
+
+def _report_stale_run(cfg: cfgmod.Config, fetch_fn, get_secret) -> None:
+    """The lock is held by a run older than 2 intervals (hung or overrunning): tell the dead-man once per
+    stuck run, so exit 5 forever is not silent."""
+    d = Path(cfg.data_dir).expanduser()
+    try:
+        started = int((d / "run.lock").read_text().split()[1])
+    except (OSError, ValueError, IndexError):
+        return
+    if time.time() - started <= 2 * cfg.interval_seconds:
+        return
+    reported = d / "run.lock.stale-reported"
+    try:
+        if reported.read_text().strip() == str(started):
+            return
+    except OSError:
+        pass
+    log.error("a previous run has held the run lock since %s (more than 2 intervals): it is hung or overrunning", started)
+    alerts.dead_man_ping(cfg, cycle_ok=False, error_class="StaleRun", channels_healthy=False,
+                         fetch=fetch_fn, get_secret=get_secret)
+    with contextlib.suppress(OSError):
+        reported.write_text(f"{started}\n")
 
 
 def _move_aside(path: Path) -> Path:
@@ -157,6 +185,7 @@ def run_once(cfg: cfgmod.Config, *, runner_factory: Callable | None = None, now:
     try:
         stack.enter_context(run_lock(cfg))
     except RunLocked:
+        _report_stale_run(cfg, fetch_fn, get_secret)
         raise
     except Exception as e:  # cannot even create the lock/data dir
         alerts.dead_man_ping(cfg, cycle_ok=False, error_class=type(e).__name__, channels_healthy=False,
@@ -216,11 +245,21 @@ def _run_locked(cfg, store, reset_note, runner_factory, now, deadline_s, fetch, 
 
 def test_alerts(cfg: cfgmod.Config, *, fetch: Callable | None = None,
                 get_secret: Callable[[str], str | None] = secrets.get, senders: list | None = None) -> dict:
-    """Send one [TEST] message to every configured channel (ignores min_status)."""
+    """Send one [TEST] message to every configured channel (ignores min_status).
+
+    Takes the run lock (RunLocked when a run is in progress) and only ever OPENS the database: an unusable file
+    is left exactly where it is (no store: the sends are then not recorded), never moved aside or replaced."""
     secrets.install_log_scrubber()
     snd = alerts.build_senders(cfg, fetch or net.fetch, get_secret) if senders is None else senders
-    store = open_store(cfg)  # test sends are recorded, so a repaired channel counts as healthy again
-    try:
-        return alerts.Dispatcher(snd, store, alerts.page_url(cfg)).test_all(version.read_version())
-    finally:
-        store.close()
+    with run_lock(cfg):
+        store = None
+        try:
+            store = Store(db_path(cfg))   # test sends are recorded, so a repaired channel counts as healthy again
+        except StoreError as e:
+            log.warning("test-alert: database not opened, sends will not be recorded: %s", type(e).__name__)
+        try:
+            return alerts.Dispatcher(snd, store, alerts.page_url(cfg), budget_s=cfg.alert_budget_seconds,
+                                     channel_budget_s=cfg.channel_budget_seconds).test_all(version.read_version())
+        finally:
+            if store is not None:
+                store.close()

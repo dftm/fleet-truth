@@ -61,3 +61,43 @@ def test_retention_pruning(tmp_path):
     assert [r["run_id"] for r in s.db.execute("SELECT run_id FROM results")] == [new]
     assert {r["id"] for r in s.db.execute("SELECT id FROM runs")} == {mid, new}  # runs kept 90 days
     assert [r["sent_at"] for r in s.db.execute("SELECT sent_at FROM alerts")] == [now - 10 * day]  # alerts 365 days
+
+
+# ------------------------------------------------------------------ review 3 F5: upgrading keeps open episodes open
+def old_db(tmp_path):
+    """A database as the previous fix pass wrote it: schema 2, episode columns present but NULL for old rows."""
+    import sqlite3
+    p = tmp_path / "old.db"
+    c = sqlite3.connect(p)
+    c.executescript(MIGRATIONS[0] + MIGRATIONS[1])
+    c.execute("PRAGMA user_version=2")
+    c.execute("INSERT INTO check_state(app,check_name,status,verdict,since,consecutive,alerted_status,last_alert_at)"
+              " VALUES ('a','HEALTHZ','crit','DOWN',1000000,5,'crit',1000300)")
+    c.execute("INSERT INTO check_state(app,check_name,status,verdict,since,consecutive,alerted_status,last_alert_at)"
+              " VALUES ('a','OTHER','ok','OK',1000000,9,NULL,NULL)")
+    c.commit()
+    c.close()
+    return p
+
+
+def test_upgrade_reconstructs_the_open_episode(tmp_path):
+    s = Store(old_db(tmp_path))
+    st = s.get_state("a", "HEALTHZ")
+    assert (st.unhealthy_since, st.unhealthy_cycles, st.worst_status, st.worst_verdict) == (1000000, 5, "crit", "DOWN")
+    assert st.alerted_status == "crit" and st.last_alert_at == 1000300
+    ok = s.get_state("a", "OTHER")
+    assert ok.unhealthy_since is None and ok.worst_status is None
+    assert s.db.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+
+
+@pytest.mark.parametrize("then", ["warn", "unknown", "crit"])
+def test_no_new_alert_after_upgrading_an_alerted_crit_episode(tmp_path, then):
+    from fleet_truth import config, cycle
+    from tests.test_cycle import FakeRunner
+    s = Store(old_db(tmp_path))
+    cfg = config.parse({"apps": [{"name": "a", "health": {"url": "https://a.example.com/"}}]})
+    rn = FakeRunner(lambda app, now: iter([("HEALTHZ", CheckResult(then, "V", "d"))]))
+    got = []
+    for i in range(8):   # ~40 minutes: long enough for the blind timer too
+        got += cycle.run_cycle(cfg, s, rn, now=1_000_900 + i * 300, deadline_s=5).decisions
+    assert [d.kind for d in got if d.check == "HEALTHZ"] == [], got
