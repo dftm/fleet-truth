@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fleet-truth"
+dynamic = ["version"]
+description = "Read-only fleet monitor: is what runs what you think runs?"
+requires-python = ">=3.12"
+dependencies = ["fastapi", "uvicorn", "jinja2", "pyyaml"]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[project.scripts]
+fleet-truth = "fleet_truth.cli:main"
+
+[tool.setuptools]
+packages = ["fleet_truth", "fleet_truth.checks"]
+
+[tool.setuptools.dynamic]
+version = {file = ["fleet_truth/VERSION"]}
+
+[tool.setuptools.package-data]
+fleet_truth = ["VERSION"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "spike"]
+pythonpath = ["."]
+markers = ["loopback: test may connect to 127.0.0.1 / ::1 (fake servers); everything else stays blocked"]
