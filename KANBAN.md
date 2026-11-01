@@ -6,7 +6,7 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
 
 ## In Progress
 
-(none)
+  -  Cards [1]-[7] are built on branch `wt/1-mvp` (worktree `/home/dftms/worktrees/fleet-truth/wt-1-mvp`), one commit per card, 236 tests green. Awaiting the separate adversarial reviewer and the owner steps listed in [WIP/streams/wt-1-mvp.md](WIP/streams/wt-1-mvp.md). Not merged to `main`.  
 
 ## Backlog Index
 
@@ -29,6 +29,7 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
 
 ### [1] Scaffold: package, CLI, version, tests
 
+  -  **Status (2026-11-01):** built, tests green, awaiting reviewer. Commit on `wt/1-mvp`; evidence in [WIP/streams/wt-1-mvp.md](WIP/streams/wt-1-mvp.md).  
   -  **Severity:** medium  
   -  **Priority:** high (blocks everything)  
   -  **Est:** 2 h  
@@ -43,6 +44,7 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
 
 ### [2] fleet.yaml loader and validation
 
+  -  **Status (2026-11-01):** built, tests green, awaiting reviewer. Commit on `wt/1-mvp`; evidence in [WIP/streams/wt-1-mvp.md](WIP/streams/wt-1-mvp.md).  
   -  **Severity:** high (wrong config = silent blind spots)  
   -  **Priority:** high  
   -  **Est:** 3 h  
@@ -57,6 +59,7 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
 
 ### [3] Pinned HTTP probe: HEALTHZ, DEEP_PROBE, TLS_EXPIRY
 
+  -  **Status (2026-11-01):** built, tests green, awaiting reviewer (including a bypass attempt on the IP check). Commit on `wt/1-mvp`; evidence in [WIP/streams/wt-1-mvp.md](WIP/streams/wt-1-mvp.md).  
   -  **Severity:** high (SSRF and secret-leak surface)  
   -  **Priority:** high  
   -  **Est:** 6 h  
@@ -74,6 +77,7 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
 
 ### [4] Git mirror, DRIFT and UNPUSHED (port the spike)
 
+  -  **Status (2026-11-01):** built, tests green, awaiting reviewer. Commit on `wt/1-mvp`; evidence in [WIP/streams/wt-1-mvp.md](WIP/streams/wt-1-mvp.md).  
   -  **Severity:** high (core value)  
   -  **Priority:** high  
   -  **Est:** 5 h  
@@ -89,6 +93,7 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
 
 ### [5] File checks: BACKUP_AGE, HEARTBEAT, STALE_BUILD
 
+  -  **Status (2026-11-01):** built, tests green, awaiting reviewer. Commit on `wt/1-mvp`; evidence in [WIP/streams/wt-1-mvp.md](WIP/streams/wt-1-mvp.md).  
   -  **Severity:** medium  
   -  **Priority:** high  
   -  **Est:** 3 h  
@@ -103,6 +108,7 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
 
 ### [6] SQLite store, cycle runner, flap guard
 
+  -  **Status (2026-11-01):** built, tests green, awaiting reviewer. Commit on `wt/1-mvp`; evidence in [WIP/streams/wt-1-mvp.md](WIP/streams/wt-1-mvp.md).  
   -  **Severity:** high (bad state logic = alert spam or silence)  
   -  **Priority:** high  
   -  **Est:** 5 h  
@@ -118,6 +124,7 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
 
 ### [7] Alerts and dead-man ping
 
+  -  **Status (2026-11-01):** built with stub-transport tests; real `[TEST]` on the owner's channel (Q3) still open; awaiting reviewer. Commit on `wt/1-mvp`; evidence in [WIP/streams/wt-1-mvp.md](WIP/streams/wt-1-mvp.md).  
   -  **Severity:** high  
   -  **Priority:** high  
   -  **Est:** 4 h  

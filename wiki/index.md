@@ -5,5 +5,6 @@
   -  [mvp-plan.md](mvp-plan.md) -- weekend MVP, one-month version, test strategy, security checklist, Plan B  
   -  [business.md](business.md) -- pricing and packaging, honestly  
   -  [open-questions.md](open-questions.md) -- 6 decisions needed from the owner, each with a default  
+  -  [implementation-notes.md](implementation-notes.md) -- what the code does where the design was silent, security proofs map, what is not built  
   -  [session-state.md](session-state.md) -- what is in flight right now  
   -  [log.md](log.md) -- append-only history  
