@@ -86,6 +86,9 @@ def format_message(d: AlertDecision, url: str, cycle_clear: bool = True, app_cle
     elif d.kind == "flapping":
         head = f"[{'CRIT ' if d.level == 'crit' else ''}FLAPPING] {d.app} {d.check}"
         body = d.detail
+    elif d.kind == "sustained":
+        head = f"[{d.level.upper()}] {d.app} {d.check}: sustained failure"
+        body = d.detail
     elif d.kind == "stable":
         head = f"[STABLE] {d.app} {d.check}"
         body = d.detail

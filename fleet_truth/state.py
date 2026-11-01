@@ -67,11 +67,14 @@ def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: fl
     recovered_at, ep_alerted, ep_last = (prev.recovered_at, prev.ep_alerted, prev.ep_last_alert) if prev else (None, None, None)
 
     def mk(kind: str, level: str, detail: str | None = None) -> AlertDecision:
-        return AlertDecision(kind, app, check, r.status, level, worst_v if bad and worst != "unknown" else r.verdict,
-                             detail if detail is not None else r.detail, ep_since if bad else since,
-                             ep_cycles if bad else consecutive,
+        in_ep = bad or kind in ("alert", "reminder", "blind")
+        return AlertDecision(kind, app, check, r.status if bad or kind == "recovered" else (worst or r.status), level,
+                             worst_v if in_ep and worst != "unknown" else r.verdict,
+                             detail if detail is not None else r.detail, ep_since if in_ep else since,
+                             ep_cycles if in_ep else consecutive,
                              prev.alerted_status if prev else None, prev.last_alert_at if prev else None)
 
+    pending = (not bad) and p_open and ((prev.ok_streak + 1) if prev.status in HEALTHY else 1) < recover_after
     if bad:
         if p_reopen:  # same episode continuing: restore what was in force, and remember the [OK] already went out
             alerted, last_at = prev.ep_alerted, prev.ep_last_alert
@@ -82,6 +85,9 @@ def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: fl
         ep_cycles += 1
         if worst is None or BAD_RANK[r.status] > BAD_RANK[worst]:
             worst, worst_v = r.status, r.verdict
+    if bad or pending:
+        # (a pending cycle is an ok cycle inside an open episode: the alert logic still runs, so an alert whose
+        # delivery failed is retried instead of waiting for the next failure)
         detail = r.detail
         if worst in ("warn", "crit") and r.status != worst:
             detail = f"{r.detail} (worst in this episode: {worst} {worst_v})"
@@ -96,7 +102,7 @@ def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: fl
         elif now_i - ep_since >= BLIND_AFTER_S and alerted != "unknown":
             decision = mk("blind", blind_level)
             alerted, last_at = "unknown", now_i
-    else:
+    if not bad:
         ok_streak = (prev.ok_streak + 1) if prev is not None and prev.status in HEALTHY else 1
         if p_open and ok_streak >= recover_after:
             if alerted is not None and not ok_notified:

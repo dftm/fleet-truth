@@ -48,6 +48,8 @@ def _load(store: Store, app: str, check: str) -> dict:
     st.setdefault("worst", "warn")
     st.setdefault("clear", 0)
     st.setdefault("last_alert", 0)
+    st.setdefault("last_msg", 0)      # when a flapping-class message (flapping / stable) last went out
+    st.setdefault("notified", False)  # a [FLAPPING] notice is outstanding, so a [STABLE] is owed
     st.setdefault("int_alert", 0)
     return st
 
@@ -81,19 +83,41 @@ def step(store: Store, app: str, check: str, prev_status: str | None, status: st
     if not st["flapping"]:
         if len(hist) >= flips:
             lvl = "crit" if any(e[1] == "crit" for e in hist) else "warn"
-            st.update(flapping=True, worst=lvl, clear=0, last_alert=int(now))
-            decision = ("flapping", lvl, f"changed state {len(hist)} times in the last {cycles} cycles; individual alerts "
-                                         f"for this check are paused until it stays ok for {clear_cycles} cycles")
+            # flapping again soon after a [STABLE] means "stable" was premature: require a longer quiet period
+            # next time (doubling, at most 8x), so flap -> stable -> flap cannot ping-pong every hour
+            recent = st["last_msg"] and now - st["last_msg"] < 86400
+            need = min(st.get("clear_need", clear_cycles) * 2, clear_cycles * 8) if recent else clear_cycles
+            st.update(flapping=True, worst=lvl, clear=0, last_alert=int(now), bad_run=0, clear_need=need,
+                      notified=True, last_msg=int(now))
+            decision = ("flapping", lvl, f"changed state {len(hist)} times in the last {cycles} cycles; individual "
+                                         f"alerts for this check are paused until it stays ok for {need} cycles")
     else:
+        escalated = status == "crit" and st["worst"] != "crit"
         if status == "crit":
             st["worst"] = "crit"
         st["clear"] = st["clear"] + 1 if status in GOOD else 0
-        if st["clear"] >= clear_cycles:
-            decision = ("stable", st["worst"], f"stable again: ok for {clear_cycles} cycles in a row; normal alerting resumed")
-            st.update(flapping=False, flips=[], clear=0, last_alert=0)
+        st["bad_run"] = 0 if status in GOOD else st.get("bad_run", 0) + 1
+        if st["bad_run"] >= cycles and st["worst"] in ("warn", "crit"):
+            # a whole flap window without a single flip: this is a sustained failure, not flapping. Hand the check
+            # back to normal alerting, and say so with a real alert (the pair alerts were suppressed meanwhile).
+            lvl = st["worst"] if status in ("warn", "crit") else "crit" if st["worst"] == "crit" else "warn"
+            st.update(flapping=False, flips=[], clear=0, last_alert=0, bad_run=0)
             hist = []
+            decision = ("sustained", lvl, f"failing for {cycles} cycles in a row after flapping: a sustained failure "
+                                       f"(latest: {status})")
+        elif st["clear"] >= st.get("clear_need", clear_cycles):
+            if st["notified"]:
+                decision = ("stable", st["worst"], f"stable again: ok for {st.get('clear_need', clear_cycles)} cycles in a row; "
+                                                   "normal alerting resumed")
+                st.update(notified=False, last_msg=int(now))
+            st.update(flapping=False, flips=[], clear=0, last_alert=0, bad_run=0)
+            hist = []
+        elif escalated:   # the [FLAPPING] notice went out at warn; a crit dip must reach crit-only channels too
+            st.update(last_alert=int(now), notified=True, last_msg=int(now))
+            decision = ("flapping", "crit", "still flapping, and the dips now include a crit failure")
         elif now - st["last_alert"] >= remind_s:
             st["last_alert"] = int(now)
+            st.update(notified=True, last_msg=int(now))
             decision = ("flapping", st["worst"], f"still flapping ({len(hist)} state changes in the last {cycles} cycles)")
 
     if decision is None and not st["flapping"]:
@@ -115,9 +139,11 @@ def undo(store: Store, app: str, check: str, kind: str, clear_cycles: int) -> No
     """No channel heard the decision: make the next cycle produce it again."""
     st = _load(store, app, check)
     if kind == "flapping":
-        st["last_alert"] = 0
+        st.update(last_alert=0, last_msg=0, notified=False)
     elif kind == "intermittent":
         st["int_alert"] = 0
+    elif kind == "sustained":   # the sustained-failure hand-over: stay in flapping until the alert gets through
+        st.update(flapping=True, bad_run=10 ** 6)
     elif kind == "stable":
-        st.update(flapping=True, clear=max(clear_cycles - 1, 0))
+        st.update(flapping=True, clear=max(clear_cycles - 1, 0), notified=True)
     _save(store, app, check, st)

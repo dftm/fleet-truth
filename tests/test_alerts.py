@@ -444,7 +444,7 @@ def test_test_alert_result_restores_channel_health_for_the_dead_man(tmp_path, mo
     assert o.deliveries and o.deliveries[0].undelivered
     o.store.close()
     o = runtime.run_once(cfg, runner_factory=R_ok, now=1500, fetch=Stub(status=500))
-    assert o.dead_man.action == "withheld"  # clean cycle, but the only channel's last send failed
+    assert o.dead_man.action != "pinged"  # the retried alert failed again: never an OK ping
     o.store.close()
     ok = Stub(body=b"{}")
     res = runtime.test_alerts(cfg, fetch=ok)
@@ -854,7 +854,7 @@ def test_reference_down_for_a_day_stops_suppressing_after_the_monitor_alert_is_d
         o.store.close()
     assert mon[0][0] == 1 and mon[0][3] == 1, "the monitor-offline alert is sent on the first confirmed cycle"
     assert sorted({a for _, a, _, _ in per_app if _ == _}) == ["a0", "a1", "a2"], "per-app alerts must come out"
-    assert min(i for i, *_ in per_app) == 2, "suppressed for exactly the cycle(s) before delivery was proven"
+    assert min(i for i, *_ in per_app) == 3, "suppressed until delivery was proven; confirmation then restarts"
     st = runtime.Store(runtime.db_path(cfg)).get_state("_monitor", "NETWORK")
     assert st.verdict == "FLEET_OUTAGE" and st.status == "crit"
 
@@ -1011,7 +1011,7 @@ def test_delivery_of_the_monitor_offline_alert_alone_ends_suppression(tmp_path):
         if first_app_alert is None and any(d.decision.app != "_monitor" for d in o.deliveries):
             first_app_alert = i
         o.store.close()
-    assert first_app_alert == 2
+    assert first_app_alert == 3
     dead = Stub(status=500)
     cfg2 = off_cfg(tmp_path / "x", offline_suppress_cycles=50)
     for i in range(6):

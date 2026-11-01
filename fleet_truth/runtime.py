@@ -201,6 +201,11 @@ def run_once(cfg: cfgmod.Config, *, runner_factory: Callable | None = None, now:
         return _run_locked(cfg, store, reset_note, runner_factory, now, deadline_s, fetch, fetch_fn, senders, get_secret)
 
 
+def cycle_lost(deliveries: list) -> bool:
+    """True when some decision reached nobody: the OK dead-man ping must then be replaced by `/fail`."""
+    return any(d.undelivered for d in deliveries)
+
+
 def _run_locked(cfg, store, reset_note, runner_factory, now, deadline_s, fetch, fetch_fn, senders, get_secret) -> Outcome:
     kw = {"fetch": fetch} if fetch else {}
     runner = (runner_factory or Runner)(cfg, meta_get=store.meta_get, meta_set=store.meta_set, **kw)
@@ -236,7 +241,7 @@ def _run_locked(cfg, store, reset_note, runner_factory, now, deadline_s, fetch, 
     for d in deliveries:
         if d.undelivered and d.decision.kind != "reset":  # nobody heard it: retry next cycle
             cyc.rollback_alert_state(store, d.decision)
-    lost = any(d.undelivered for d in deliveries)
+    lost = cycle_lost(deliveries)
     # an alert nobody received means the monitor cannot do its job: say so through the dead-man, never "all good"
     dm = alerts.dead_man_ping(cfg, cycle_ok=not lost, error_class="AlertUndelivered" if lost else None,
                               channels_healthy=disp.channels_healthy(), fetch=fetch_fn, get_secret=get_secret, store=store)

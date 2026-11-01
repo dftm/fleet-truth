@@ -198,9 +198,12 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
             prev = store.get_state(app, check)
             reopen_s = max(1800.0, cfg.reopen_cooldown_cycles * cfg.interval_seconds)
             row, decision = advance(prev, app, check, res, now, cfg.confirm, cfg.blind_level, cfg.recover_after, reopen_s)
-            if (app, check) in suppressed and decision is not None:
+            if (app, check) in suppressed:
+                # a correlated cause is reported once for all apps: nothing is "alerted" for this one, and its
+                # confirmation restarts from zero so the pending-cycle retry cannot fire for a suppressed episode
                 row = dataclasses.replace(row, alerted_status=prev.alerted_status if prev else None,
-                                          last_alert_at=prev.last_alert_at if prev else None)
+                                          last_alert_at=prev.last_alert_at if prev else None,
+                                          unhealthy_cycles=0 if row.unhealthy_since is not None else row.unhealthy_cycles)
                 decision = None
             store.put_state(row)
             fo = flap.step(store, app, check, prev.status if prev else None, res.status, now, cfg.interval_seconds,
@@ -226,7 +229,8 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
 
 def rollback_alert_state(store: Store, d: AlertDecision) -> None:
     """No channel accepted the message: restore the pre-decision alert fields so the next cycle retries."""
-    if d.kind in ("flapping", "stable", "intermittent"):  # the flap module stamped its rate limit: undo it, retry next cycle
+    if d.kind in ("flapping", "stable", "intermittent", "sustained"):
+        # the flap module stamped its own state: undo it so the next cycle produces the decision again
         flap.undo(store, d.app, d.check, d.kind, 12)
         return
     row = store.get_state(d.app, d.check)
