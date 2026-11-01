@@ -57,6 +57,19 @@ class Runner:
         except ValueError:
             return True
 
+    def reference_ok(self, now: float) -> bool | None:
+        """True if any reference URL answers (any HTTP status below 500), False if none does, None if none configured."""
+        if not self.cfg.reference_urls:
+            return None
+        for url in self.cfg.reference_urls:
+            try:
+                r = self.fetch(url, headers={}, allow_private=False, timeout_s=5.0)
+                if r.status < 500:
+                    return True
+            except Exception:  # noqa: BLE001 - any failure means this reference did not answer
+                continue
+        return False
+
     def run_app(self, app: App, now: float) -> Iterator[tuple[str, CheckResult]]:
         cfg = self.cfg
         spec = None

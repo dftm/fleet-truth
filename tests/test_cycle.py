@@ -107,17 +107,83 @@ def test_single_access_app_rejected_is_a_normal_alert(store):
     assert [(d.app, d.check) for d in out[1].decisions] == [("app0", "DEEP_PROBE")]
 
 
-def test_all_network_checks_failing_gives_one_monitor_offline_alert(store):
-    cfg = mkcfg(access=False, n=4)
+class RefRunner(FakeRunner):
+    def __init__(self, fn, ref):
+        super().__init__(fn)
+        self.ref, self.ref_calls = ref, 0
 
-    def fn(app, now):
-        yield "HEALTHZ", NETDOWN
-        yield "TLS_EXPIRY", NETDOWN
+    def reference_ok(self, now):
+        self.ref_calls += 1
+        return self.ref
 
-    out = cycles(cfg, store, fn, 3)
-    assert [len(c.decisions) for c in out] == [0, 1, 0]
+
+def net_fn(app, now):
+    yield "HEALTHZ", NETDOWN
+    yield "TLS_EXPIRY", NETDOWN
+
+
+def run_two(cfg, store, runner):
+    return [cycle.run_cycle(cfg, store, runner, now=1_000_000 + i * 300, deadline_s=5) for i in range(2)]
+
+
+def test_all_failing_and_reference_fails_is_monitor_offline_and_suppresses(store):
+    cfg = mkcfg(access=False, n=4, reference_urls=["https://example.org/"])
+    rn = RefRunner(net_fn, False)
+    out = run_two(cfg, store, rn)
+    assert [len(c.decisions) for c in out] == [0, 1]
     d = out[1].decisions[0]
-    assert (d.app, d.check, d.verdict) == ("_monitor", "NETWORK", "MONITOR_OFFLINE")
+    assert (d.app, d.check, d.verdict, d.level) == ("_monitor", "NETWORK", "MONITOR_OFFLINE", "crit")
+    assert "monitor network offline" in d.detail
+
+
+def test_all_failing_but_reference_answers_is_fleet_outage_and_does_not_suppress(store):
+    cfg = mkcfg(access=False, n=3, reference_urls=["https://example.org/"])
+    out = run_two(cfg, store, RefRunner(net_fn, True))
+    ds = out[1].decisions
+    assert sorted((d.app, d.check) for d in ds) == sorted(
+        [("_monitor", "NETWORK")] + [(f"app{i}", c) for i in range(3) for c in ("HEALTHZ", "TLS_EXPIRY")])
+    mon = [d for d in ds if d.app == "_monitor"][0]
+    assert mon.verdict == "FLEET_OUTAGE" and "fleet-wide outage (VPS or tunnel)" in mon.detail
+
+
+def test_all_failing_without_reference_says_it_cannot_tell_and_does_not_suppress(store):
+    cfg = mkcfg(access=False, n=3)
+    rn = RefRunner(net_fn, None)
+    out = run_two(cfg, store, rn)
+    mon = [d for d in out[1].decisions if d.app == "_monitor"][0]
+    assert mon.verdict == "ALL_APPS_FAILING" and "VPS/tunnel outage OR monitor offline" in mon.detail
+    assert len([d for d in out[1].decisions if d.app != "_monitor"]) == 6
+
+
+def test_reference_is_only_consulted_when_everything_fails(store):
+    cfg = mkcfg(access=False, n=3, reference_urls=["https://example.org/"])
+    rn = RefRunner(lambda a, n: iter([("HEALTHZ", OK)]), True)
+    run_two(cfg, store, rn)
+    assert rn.ref_calls == 0
+
+
+def test_real_runner_reference_ok(tmp_path):
+    from fleet_truth.net import FetchError, Response
+    cfg = mkcfg(access=False, n=2, reference_urls=["https://a.example.org/", "https://b.example.org/"])
+    seen = []
+
+    def fetch(url, **kw):
+        seen.append((url, kw["allow_private"]))
+        if "a.example" in url:
+            raise FetchError("CONNECT", "x")
+        return Response(404, {}, b"", "1.1.1.1", None, 1)
+
+    assert runner_mod.Runner(cfg, fetch=fetch).reference_ok(0) is True and seen[-1] == ("https://b.example.org/", False)
+    assert runner_mod.Runner(cfg, fetch=lambda u, **k: Response(503, {}, b"", "x", None, 1)).reference_ok(0) is False
+    assert runner_mod.Runner(mkcfg(access=False, n=2)).reference_ok(0) is None
+
+
+def test_reference_urls_config_validation():
+    base = {"apps": [{"name": "a"}]}
+    assert config.parse({**base, "reference_urls": ["https://example.org/"]}).reference_urls == ("https://example.org/",)
+    for bad in (["http://example.org/"], ["https://u:p@example.org/"], "https://example.org/", ["https://a/", "https://b/", "https://c/", "https://d/"], [5]):
+        with pytest.raises(config.ConfigError):
+            config.parse({**base, "reference_urls": bad})
 
 
 def test_http_503_everywhere_is_not_monitor_offline(store):

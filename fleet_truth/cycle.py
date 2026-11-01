@@ -84,24 +84,49 @@ def _run_apps(cfg: Config, runner, now: float, deadline_s: float, workers: int
     return snapshot, timed_out
 
 
-def correlate(cfg: Config, results: dict) -> tuple[dict, set]:
-    """Add monitor-level pseudo results and return (extra results, suppressed (app, check) keys)."""
+def correlate(cfg: Config, results: dict, reference: Callable[[], bool | None] | None = None) -> tuple[dict, set]:
+    """Add monitor-level pseudo results and return (extra results, suppressed (app, check) keys).
+
+    When every app's HEALTHZ failed at the network layer, the cause is ambiguous: this machine's network or
+    the whole fleet (one VPS or tunnel). An independent reference URL decides, and only a failing reference
+    suppresses per-app alerts:
+      reference answers  -> FLEET_OUTAGE (crit), per-app alerts still go out;
+      reference fails    -> MONITOR_OFFLINE (crit), per-app network alerts suppressed this cycle;
+      no reference set   -> ALL_APPS_FAILING (crit), says it cannot tell, suppresses nothing.
+    """
     extra: dict = {}
     suppressed: set = set()
-    # (b) every app's HEALTHZ failed at the network layer -> the monitor is offline, not N apps down
     hz = {a.name: results.get((a.name, "HEALTHZ")) for a in cfg.apps if a.health}
     hz = {k: v for k, v in hz.items() if v is not None}
-    offline = len(hz) >= 2 and all(v.status == "crit" and v.data.get("net_error") in NET_ERRORS for v in hz.values())
+    all_fail = len(hz) >= 2 and all(v.status == "crit" and v.data.get("net_error") in NET_ERRORS for v in hz.values())
+    offline = False
     if len(hz) >= 2:
-        extra[(MONITOR_APP, NETWORK_CHECK)] = (
-            CheckResult("crit", "MONITOR_OFFLINE", "every app's HEALTHZ failed at the network layer at once: "
-                        "this machine (or its network) is offline, app alerts are suppressed this cycle")
-            if offline else CheckResult("ok", "OK", "network reachable"))
+        if not all_fail:
+            extra[(MONITOR_APP, NETWORK_CHECK)] = CheckResult("ok", "OK", "network reachable")
+        else:
+            n = len(hz)
+            try:
+                ref = reference() if reference else None
+            except Exception:  # noqa: BLE001
+                ref = None
+            if ref is True:
+                extra[(MONITOR_APP, NETWORK_CHECK)] = CheckResult(
+                    "crit", "FLEET_OUTAGE", f"fleet-wide outage (VPS or tunnel): all {n} apps fail from here while the "
+                    "reference URL answers. Per-app alerts are not suppressed")
+            elif ref is False:
+                offline = True
+                extra[(MONITOR_APP, NETWORK_CHECK)] = CheckResult(
+                    "crit", "MONITOR_OFFLINE", f"monitor network offline: all {n} apps and the reference URL fail from "
+                    "here. App network alerts are suppressed this cycle")
+            else:
+                extra[(MONITOR_APP, NETWORK_CHECK)] = CheckResult(
+                    "crit", "ALL_APPS_FAILING", f"all {n} apps failing simultaneously: VPS/tunnel outage OR monitor "
+                    "offline (no reference_urls configured to tell which). Per-app alerts are not suppressed")
     if offline:
         for a in cfg.apps:
             for c in NETWORK_CHECKS:
                 suppressed.add((a.name, c))
-    # (a) every auth: access app's DEEP_PROBE says AUTH_REJECTED -> one shared cause, one alert
+    # every auth: access app's DEEP_PROBE says AUTH_REJECTED -> one shared cause, one alert
     acc = [a for a in cfg.apps if a.version and a.version.auth == "access"]
     probes = {a.name: results.get((a.name, "DEEP_PROBE")) for a in acc}
     probes = {k: v for k, v in probes.items() if v is not None}
@@ -136,7 +161,8 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
                     if name not in got:
                         cr.results[(app.name, name)] = CheckResult(
                             "unknown", "TIMEOUT_CYCLE", f"check did not finish within the {deadline:.0f}s cycle deadline")
-        extra, suppressed = correlate(cfg, cr.results)
+        ref_fn = (lambda: runner.reference_ok(now)) if hasattr(runner, "reference_ok") else None
+        extra, suppressed = correlate(cfg, cr.results, ref_fn)
         for key, res in extra.items():
             cr.results[key] = res
         for (app, check), res in cr.results.items():

@@ -170,6 +170,7 @@ class Config:
     alerts: tuple[AlertCfg, ...] = ()
     dead_man: DeadMan = field(default_factory=DeadMan)
     apps: tuple[App, ...] = ()
+    reference_urls: tuple[str, ...] = ()  # independent public URLs used to tell 'monitor offline' from 'fleet down'
 
     def env_names(self) -> list[str]:
         """Every env var NAME this config refers to, in first-seen order."""
@@ -492,7 +493,7 @@ def parse(data: Any) -> Config:
         raise ConfigError(["<root>: the file must contain a mapping"])
     _scan_literal_secrets(data, "", ctx)
     top = _obj(data, "", ctx, {"interval_seconds", "confirm", "data_dir", "web", "git", "credentials", "alerts",
-                               "dead_man", "defaults", "apps"})
+                               "dead_man", "defaults", "apps", "reference_urls"})
     interval = int(_num(top, "interval_seconds", "interval_seconds", ctx, 300, 10, True)) if "interval_seconds" in top else 300
     confirm = int(_num(top, "confirm", "confirm", ctx, 2, 1, True)) if "confirm" in top else 2
     data_dir = _str(top, "data_dir", "data_dir", ctx, "~/.local/share/fleet-truth") or "~/.local/share/fleet-truth"
@@ -522,6 +523,18 @@ def parse(data: Any) -> Config:
     dm = _obj(top.get("dead_man"), "dead_man", ctx, {"url_env"})
     dead_man = DeadMan(_env(dm, "url_env", "dead_man", ctx))
 
+    refs: list[str] = []
+    raw_refs = top.get("reference_urls")
+    if raw_refs is not None and not isinstance(raw_refs, list):
+        ctx.err("reference_urls", "must be a list of https URLs")
+    elif raw_refs:
+        if len(raw_refs) > 3:
+            ctx.err("reference_urls", "at most 3 reference URLs")
+        for i, u in enumerate(raw_refs[:3]):
+            ok = _url(u, f"reference_urls[{i}]", ctx, allow_private=False)
+            if ok:
+                refs.append(ok)
+
     defaults = _obj(top.get("defaults"), "defaults", ctx, {"drift", "unpushed", "backup", "tls", "build", "heartbeat"})
 
     apps: list[App] = []
@@ -550,7 +563,7 @@ def parse(data: Any) -> Config:
 
     if ctx.errors:
         raise ConfigError(ctx.errors)
-    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps))
+    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), tuple(refs))
     secrets.register(*cfg.env_names())
     return cfg
 
