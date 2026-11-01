@@ -448,3 +448,175 @@ def test_test_alert_result_restores_channel_health_for_the_dead_man(tmp_path, mo
     o2 = runtime.run_once(cfg, runner_factory=R_ok, now=2000, fetch=ok)
     assert o2.dead_man.action == "pinged"
     o2.store.close()
+
+
+# ------------------------------------------------------------------ REAL code paths against loopback servers
+from functools import partial  # noqa: E402
+
+from tests.smtpstub import SMTPStub  # noqa: E402
+
+
+def smtp_sender(port, cert, *, creds=True, timeout=3.0, host="mail.test"):
+    d = {"type": "email", "smtp_host": host, "smtp_port": port, "from": "f@x.org", "to": "t@x.org"}
+    if creds:
+        d.update(username_env="SMTP_USER", password_env="SMTP_PW")
+    cfg = cfg_with(d)
+    resolver = lambda h, p, type=0: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", p))]  # noqa: E731
+    factory = partial(alerts._default_smtp_factory, resolver=resolver, hooks=LO, timeout=timeout)
+    ctx = lambda: client_ctx(cert[0])  # noqa: E731
+    (s,) = [alerts.EmailSender(cfg.alerts[0], "email", secrets.get, smtp_factory=factory, ssl_context=ctx)]
+    return s
+
+
+@pytest.mark.loopback
+def test_real_email_path_succeeds_with_starttls_then_login_then_message(tmp_path):
+    cert = make_cert(tmp_path, "mail.test")
+    stub = SMTPStub("ok", cert)
+    try:
+        r = smtp_sender(stub.port, cert).send(alerts.format_message(decision(), "http://127.0.0.1:8790/"))
+        assert r.ok, r
+        assert stub.auth and stub.auth[0][-1] == b"SEKRIT-smtp-pw"
+        assert stub.messages and stub.messages[0][0] == "tls", "message must only travel after STARTTLS"
+        assert "[CRIT] jobs DEEP_PROBE" in stub.messages[0][1]
+        order = [e[1] for e in stub.events]
+        assert order.index("STARTTLS") < order.index("AUTH") < order.index("DATA")
+    finally:
+        stub.close()
+
+
+@pytest.mark.loopback
+def test_real_email_path_failure_modes_are_precise_and_secret_free(tmp_path):
+    cert = make_cert(tmp_path, "mail.test")
+    msg = alerts.format_message(decision(), "u")
+    secrets.register("SMTP_PW")
+    # server without STARTTLS: refuse to send in clear
+    stub = SMTPStub("no_starttls", cert)
+    try:
+        r = smtp_sender(stub.port, cert).send(msg)
+        assert not r.ok and "SMTPNotSupportedError" in r.error
+        assert not stub.messages and not stub.auth, "nothing may be sent or authenticated in clear"
+    finally:
+        stub.close()
+    # refused connection
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    r = smtp_sender(port, cert).send(msg)
+    assert not r.ok and "ConnectionRefusedError" in r.error
+    # bad greeting
+    stub = SMTPStub("bad_greeting", cert)
+    try:
+        r = smtp_sender(stub.port, cert).send(msg)
+        assert not r.ok and "SMTPConnectError" in r.error and "554" in r.error
+    finally:
+        stub.close()
+    # slow / silent server
+    stub = SMTPStub("silent", cert)
+    try:
+        t0 = time.monotonic()
+        r = smtp_sender(stub.port, cert, timeout=0.8).send(msg)
+        assert not r.ok and time.monotonic() - t0 < 4
+        assert "Timeout" in r.error or "timed out" in r.error or "SMTPServerDisconnected" in r.error
+    finally:
+        stub.close()
+    # credentials rejected, DATA rejected
+    for mode, name in (("auth_reject", "SMTPAuthenticationError"), ("data_reject", "SMTPDataError")):
+        stub = SMTPStub(mode, cert)
+        try:
+            r = smtp_sender(stub.port, cert).send(msg)
+            assert not r.ok and name in r.error and "SEKRIT-smtp-pw" not in r.error
+        finally:
+            stub.close()
+    # untrusted certificate: STARTTLS handshake fails, nothing sent
+    other = make_cert(tmp_path / "o", "mail.test")
+    stub = SMTPStub("ok", cert)
+    try:
+        r = smtp_sender(stub.port, other).send(msg)
+        assert not r.ok and "SSL" in r.error and not stub.messages
+    finally:
+        stub.close()
+
+
+@pytest.mark.loopback
+def test_real_email_factory_refuses_unvalidated_targets():
+    with pytest.raises(net.FetchError) as e:
+        alerts._default_smtp_factory("127.0.0.1", 25)  # no test hook: loopback is blocked
+    assert e.value.kind == "BLOCKED"
+    with pytest.raises(net.FetchError):
+        alerts._default_smtp_factory("169.254.169.254", 25)
+
+
+def https_fixture(tmp_path, host, handler):
+    cert = make_cert(tmp_path, host)
+    srv = FakeServer(handler, tls=cert)
+    resolver = lambda h, p, type=0: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", p))]  # noqa: E731
+    fetch = functools.partial(net.fetch, resolver=resolver, _hooks=net.TestHooks(True, client_ctx(cert[0])))
+    return srv, fetch
+
+
+@pytest.mark.loopback
+def test_real_telegram_path(tmp_path, monkeypatch):
+    srv, fetch = https_fixture(tmp_path, "api.telegram.org", lambda r: (200, {}, b'{"ok": true}'))
+    try:
+        monkeypatch.setattr(alerts, "TELEGRAM_API", f"https://api.telegram.org:{srv.port}")
+        (s,) = alerts.build_senders(cfg_with(TG), fetch)
+        assert s.send(alerts.format_message(decision(), "u")).ok
+        req = srv.requests[0]
+        assert req.path == f"/bot{TOKEN}/sendMessage" and req.method == "POST"
+        assert json.loads(req.body)["chat_id"] == "-100777" and TOKEN not in req.body.decode()
+        assert req.headers["host"].startswith("api.telegram.org")
+        srv.requests.clear()
+    finally:
+        srv.close()
+    srv, fetch = https_fixture(tmp_path / "b", "api.telegram.org", lambda r: (401, {}, b'{"ok": false}'))
+    try:
+        monkeypatch.setattr(alerts, "TELEGRAM_API", f"https://api.telegram.org:{srv.port}")
+        (s,) = alerts.build_senders(cfg_with(TG), fetch)
+        r = s.send(alerts.format_message(decision(), "u"))
+        assert not r.ok and r.error == "HTTP 401 from Telegram" and TOKEN not in r.error
+    finally:
+        srv.close()
+
+
+@pytest.mark.loopback
+def test_real_ntfy_path(tmp_path):
+    srv, fetch = https_fixture(tmp_path, "ntfy.test", lambda r: (200, {}, b"{}"))
+    try:
+        cfg = cfg_with({"type": "ntfy", "url": f"https://ntfy.test:{srv.port}", "topic_env": "NTFY_TOPIC", "token_env": "NTFY_TOK"})
+        (s,) = alerts.build_senders(cfg, fetch)
+        assert s.send(alerts.format_message(decision(), "u")).ok
+        req = srv.requests[0]
+        assert req.path == "/sekrit-topic-xyz" and req.headers["authorization"] == "Bearer tk_SEKRIT_ntfy"
+        assert req.headers["priority"] == "5" and req.body.decode().startswith("[CRIT]")
+    finally:
+        srv.close()
+    srv, fetch = https_fixture(tmp_path / "b", "ntfy.test", lambda r: (403, {}, b"no"))
+    try:
+        cfg = cfg_with({"type": "ntfy", "url": f"https://ntfy.test:{srv.port}", "topic_env": "NTFY_TOPIC"})
+        (s,) = alerts.build_senders(cfg, fetch)
+        r = s.send(alerts.format_message(decision(), "u"))
+        assert not r.ok and r.error == "HTTP 403 from ntfy"
+    finally:
+        srv.close()
+
+
+@pytest.mark.loopback
+def test_real_webhook_json_and_healthchecks_paths(tmp_path, monkeypatch):
+    srv, fetch = https_fixture(tmp_path, "hook.test", lambda r: (200, {}, b"OK"))
+    try:
+        monkeypatch.setenv("HOOK_URL", f"https://hook.test:{srv.port}/ping/u-1")
+        (s,) = alerts.build_senders(cfg_with({"type": "webhook", "url_env": "HOOK_URL"}), fetch)
+        assert s.send(alerts.format_message(decision(), "u")).ok
+        assert json.loads(srv.requests[0].body)["check"] == "DEEP_PROBE" and srv.requests[0].path == "/ping/u-1"
+        (h,) = alerts.build_senders(cfg_with({"type": "webhook", "url_env": "HOOK_URL", "mode": "healthchecks"}), fetch)
+        assert h.send(alerts.format_message(decision(), "u")).ok
+        assert srv.requests[-1].path == "/ping/u-1/fail"
+        assert h.send(alerts.format_message(decision(kind="recovered"), "u")).ok
+        assert srv.requests[-1].path == "/ping/u-1"
+    finally:
+        srv.close()
+    srv, fetch = https_fixture(tmp_path / "b", "hook.test", lambda r: (500, {}, b"x"))
+    try:
+        monkeypatch.setenv("HOOK_URL", f"https://hook.test:{srv.port}/p")
+        (s,) = alerts.build_senders(cfg_with({"type": "webhook", "url_env": "HOOK_URL"}), fetch)
+        assert s.send(alerts.format_message(decision(), "u")).error == "HTTP 500 from webhook"
+    finally:
+        srv.close()

@@ -193,12 +193,19 @@ class WebhookSender(_Base):
         return SendResult(ok, "" if ok else f"HTTP {r.status} from webhook")
 
 
+SMTP_TIMEOUT_S = 10.0
+
+
 class _PinnedSMTP(smtplib.SMTP):
     """SMTP that connects to an already-validated IP while TLS still verifies the hostname."""
 
-    def __init__(self, ips: list[str], *a, **kw):
+    def __init__(self, ips: list[str], timeout: float = SMTP_TIMEOUT_S):
         self._ips = ips
-        super().__init__(*a, **kw)
+        super().__init__(timeout=timeout)  # explicit timeout: smtplib's default sentinel breaks settimeout()
+
+    def connect(self, host="localhost", port=0, source_address=None):
+        self._host = host  # starttls() verifies the certificate against this name
+        return super().connect(host, port, source_address)
 
     def _get_socket(self, host, port, timeout):
         last = None
@@ -214,17 +221,32 @@ class _PinnedSMTP(smtplib.SMTP):
         raise last or OSError("no address")
 
 
-def _default_smtp_factory(host: str, port: int, resolver=None, hooks=None) -> smtplib.SMTP:
-    t = net.Target("smtp", host, port, "/", None)
+def _default_smtp_factory(host: str, port: int, resolver=None, hooks=None,
+                          timeout: float = SMTP_TIMEOUT_S) -> smtplib.SMTP:
+    import ipaddress
     try:
-        import ipaddress
-        t = net.Target("smtp", host, port, "/", ipaddress.ip_address(host))
+        literal = ipaddress.ip_address(host)
     except ValueError:
-        pass
+        literal = None
+    t = net.Target("smtp", host, port, "/", literal)
     ips = net.validate_addresses(t, False, resolver, hooks)
-    smtp = _PinnedSMTP(ips)
-    smtp.connect(host, port)
+    smtp = _PinnedSMTP(ips, timeout)
+    try:
+        code, _msg = smtp.connect(host, port)
+        if code != 220:  # smtplib.connect returns the greeting instead of raising on a refusal
+            raise smtplib.SMTPConnectError(code, "bad greeting")
+    except Exception:
+        smtp.close()
+        raise
     return smtp
+
+
+def _smtp_failure(e: Exception) -> str:
+    """Precise but secret-free: exception class plus the SMTP reply code when there is one."""
+    if isinstance(e, net.FetchError):
+        return f"{e.kind}: {e.message}"
+    code = getattr(e, "smtp_code", None)
+    return f"{type(e).__name__}" + (f" (SMTP {code})" if code else "")
 
 
 class EmailSender:
@@ -261,7 +283,7 @@ class EmailSender:
                 except Exception:  # noqa: BLE001
                     pass
         except Exception as e:  # noqa: BLE001
-            return _fail(e if isinstance(e, net.FetchError) else type(e).__name__)
+            return _fail(_smtp_failure(e))
         return SendResult(True)
 
 
