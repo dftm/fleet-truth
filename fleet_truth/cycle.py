@@ -16,6 +16,7 @@ from typing import Callable
 from . import config as cfgmod
 from .checks.base import RANK, CheckResult, worst
 from .config import App, Config
+from . import flap
 from .state import AlertDecision, advance
 from .store import Store
 
@@ -176,6 +177,15 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
             store.put_state(row)
             if decision is not None:
                 cr.decisions.append(decision)
+            elif (app, check) not in suppressed and row.alerted_status not in ("warn", "crit"):
+                n = flap.observe(store, app, check, prev.status if prev else None, res.status, now,
+                                 cfg.flap.cycles * cfg.interval_seconds, cfg.flap.flips, cfg.flap.remind_hours * 3600)
+                if n:
+                    cr.decisions.append(AlertDecision(
+                        "flapping", app, check, "warn", "warn", "FLAPPING",
+                        f"changed state {n} times in the last {cfg.flap.cycles} cycles; each dip is too short to confirm, "
+                        f"so no failure alert fires (latest: {res.verdict})", row.since, row.consecutive,
+                        row.alerted_status, row.last_alert_at))
         cr.worst = worst(r.status for r in cr.results.values())
         store.prune(now)
         store.finish_run(run_id, time.time(), True)

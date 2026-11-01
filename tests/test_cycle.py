@@ -383,3 +383,56 @@ def test_cli_once_exit_codes_and_config_error(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(runtime, "Runner", lambda cfg, **kw: FakeRunner(lambda a, n: iter([("HEALTHZ", CheckResult("crit", "DOWN"))])))
     assert cli.main(["once", "-c", str(good)]) == 2
     assert "HEALTHZ" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ flap detection (review F8)
+def alt_runner(seq):
+    it = {"i": 0}
+
+    def fn(app, now):
+        s = seq[it["i"] % len(seq)]
+        it["i"] += 1
+        yield "HEALTHZ", s
+    return FakeRunner(fn)
+
+
+def test_alternating_check_raises_one_rate_limited_flapping_warn(store):
+    cfg = mkcfg(access=False, n=1, flap={"flips": 6, "cycles": 12, "remind_hours": 6})
+    rn = alt_runner([CheckResult("crit", "DOWN"), OK])
+    kinds = []
+    for i in range(60):   # 5 hours of 5-minute cycles
+        cr = cycle.run_cycle(cfg, store, rn, now=1_000_000 + i * 300, deadline_s=5)
+        kinds += [(i, d.kind, d.level) for d in cr.decisions]
+    assert [(k, lv) for _, k, lv in kinds] == [("flapping", "warn")], "never a failure alert, exactly one flapping warn"
+    assert kinds[0][0] == 6  # sixth flip (cycle index 6, first result has no previous)
+    more = []
+    for i in range(60, 100):  # past the 6 h rate limit: one reminder at most
+        cr = cycle.run_cycle(cfg, store, rn, now=1_000_000 + i * 300, deadline_s=5)
+        more += [d.kind for d in cr.decisions]
+    assert more == ["flapping"]
+
+
+def test_unhealthy_to_unhealthy_alternation_is_not_a_flip_and_steady_failure_does_not_flap(store):
+    cfg = mkcfg(access=False, n=1)
+    rn = alt_runner([CheckResult("crit", "DOWN"), CheckResult("unknown", "U")])
+    got = [d.kind for i in range(14) for d in cycle.run_cycle(cfg, store, rn, now=2_000_000 + i * 300, deadline_s=5).decisions]
+    assert got == []  # crit<->unknown are both unhealthy: not a flip (a known gap: it also never confirms, see implementation-notes)
+    cfg2 = mkcfg(access=False, n=1)
+    steady = alt_runner([CheckResult("crit", "DOWN")])
+    got = [d.kind for i in range(30) for d in cycle.run_cycle(cfg2, store, steady, now=3_000_000 + i * 300, deadline_s=5).decisions]
+    assert got == ["alert"]
+
+
+def test_slow_flipping_outside_the_window_does_not_flap(store):
+    cfg = mkcfg(access=False, n=1)
+    rn = alt_runner([CheckResult("crit", "DOWN")] + [OK] * 9)   # one dip per 10 cycles
+    got = [d.kind for i in range(60) for d in cycle.run_cycle(cfg, store, rn, now=4_000_000 + i * 300, deadline_s=5).decisions]
+    assert "flapping" not in got
+
+
+def test_flap_config_validation():
+    base = {"apps": [{"name": "a"}]}
+    assert config.parse({**base, "flap": {"flips": 4, "cycles": 8}}).flap.flips == 4
+    for bad in ({"flips": 1}, {"cycles": "x"}, {"nope": 1}):
+        with pytest.raises(config.ConfigError):
+            config.parse({**base, "flap": bad})

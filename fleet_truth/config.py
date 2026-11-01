@@ -76,6 +76,13 @@ class AlertCfg:
 
 
 @dataclass(frozen=True)
+class FlapCfg:
+    flips: int = 6          # status flips (healthy <-> unhealthy) ...
+    cycles: int = 12        # ... within this many cycles raise one 'flapping' warn
+    remind_hours: float = 6.0
+
+
+@dataclass(frozen=True)
 class DeadMan:
     url_env: str | None = None
 
@@ -170,6 +177,7 @@ class Config:
     alerts: tuple[AlertCfg, ...] = ()
     dead_man: DeadMan = field(default_factory=DeadMan)
     apps: tuple[App, ...] = ()
+    flap: FlapCfg = field(default_factory=FlapCfg)
     blind_level: str = "crit"           # level of 'monitor cannot judge' alerts, compared with channel min_status
     reference_urls: tuple[str, ...] = ()  # independent public URLs used to tell 'monitor offline' from 'fleet down'
 
@@ -494,7 +502,7 @@ def parse(data: Any) -> Config:
         raise ConfigError(["<root>: the file must contain a mapping"])
     _scan_literal_secrets(data, "", ctx)
     top = _obj(data, "", ctx, {"interval_seconds", "confirm", "data_dir", "web", "git", "credentials", "alerts",
-                               "dead_man", "defaults", "apps", "reference_urls", "blind_level"})
+                               "dead_man", "defaults", "apps", "reference_urls", "blind_level", "flap"})
     interval = int(_num(top, "interval_seconds", "interval_seconds", ctx, 300, 10, True)) if "interval_seconds" in top else 300
     confirm = int(_num(top, "confirm", "confirm", ctx, 2, 1, True)) if "confirm" in top else 2
     data_dir = _str(top, "data_dir", "data_dir", ctx, "~/.local/share/fleet-truth") or "~/.local/share/fleet-truth"
@@ -524,6 +532,9 @@ def parse(data: Any) -> Config:
     dm = _obj(top.get("dead_man"), "dead_man", ctx, {"url_env"})
     dead_man = DeadMan(_env(dm, "url_env", "dead_man", ctx))
 
+    fl = _obj(top.get("flap"), "flap", ctx, {"flips", "cycles", "remind_hours"})
+    flap = FlapCfg(int(_num(fl, "flips", "flap", ctx, 6, 2, True)), int(_num(fl, "cycles", "flap", ctx, 12, 2, True)),
+                   float(_num(fl, "remind_hours", "flap", ctx, 6.0, 0.001)))
     blind_level = _str(top, "blind_level", "blind_level", ctx, "crit")
     if blind_level not in ("warn", "crit"):
         ctx.err("blind_level", "must be warn or crit")
@@ -568,7 +579,7 @@ def parse(data: Any) -> Config:
 
     if ctx.errors:
         raise ConfigError(ctx.errors)
-    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), blind_level, tuple(refs))
+    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), flap, blind_level, tuple(refs))
     secrets.register(*cfg.env_names())
     return cfg
 

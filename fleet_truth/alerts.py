@@ -78,6 +78,9 @@ def format_message(d: AlertDecision, url: str) -> AlertMessage:
     if d.kind == "recovered":
         head = f"[OK] {d.app} {d.check}: recovered"
         body = f"{d.verdict}"
+    elif d.kind == "flapping":
+        head = f"[WARN] {d.app} {d.check}: flapping"
+        body = d.detail
     elif d.kind == "reset":
         head = "[RESET] Fleet Truth state was reset"
         body = d.detail
