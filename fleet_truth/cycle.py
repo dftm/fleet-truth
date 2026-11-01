@@ -225,6 +225,8 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
 
 def rollback_alert_state(store: Store, d: AlertDecision) -> None:
     """No channel accepted the message: restore the pre-decision alert fields so the next cycle retries."""
+    if d.kind == "flapping":  # flap.observe stamped the rate limit before dispatch: undo it so the next cycle retries
+        store.meta_set(f"flap_alerted:flips:{d.app}:{d.check}", "0")
     row = store.get_state(d.app, d.check)
     if row is not None:
         store.put_state(dataclasses.replace(row, alerted_status=d.prev_alerted_status,

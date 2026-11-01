@@ -896,3 +896,44 @@ def test_reference_urls_must_be_independent_of_the_fleet():
     assert config.parse({**base, "offline_suppress_cycles": 0}).offline_suppress_cycles == 0
     with pytest.raises(config.ConfigError):
         config.parse({**base, "offline_suppress_cycles": -1})
+
+
+# ------------------------------------------------------------------ review 2 R5: undelivered reminders and flapping alerts are retried
+def test_undelivered_reminder_is_retried_next_cycle_not_6h_later(tmp_path):
+    cfg = config.parse({"apps": [{"name": "a", "health": {"url": "https://a.example.com/healthz"}}], "alerts": [NTFY],
+                        "data_dir": str(tmp_path), "confirm": 1})
+    good, bad = Stub(body=b"{}"), Stub(status=500)
+    t0 = 1_000_000
+    runtime.run_once(cfg, runner_factory=R_crit, now=t0, fetch=good).store.close()              # alert (delivered)
+    o = runtime.run_once(cfg, runner_factory=R_crit, now=t0 + 6 * 3600, fetch=bad)             # reminder, channel down
+    assert [d.decision.kind for d in o.deliveries] == ["reminder"] and o.deliveries[0].undelivered
+    o.store.close()
+    o = runtime.run_once(cfg, runner_factory=R_crit, now=t0 + 6 * 3600 + 300, fetch=good)      # retried right away
+    assert [d.decision.kind for d in o.deliveries] == ["reminder"] and o.deliveries[0].delivered
+    o.store.close()
+    o = runtime.run_once(cfg, runner_factory=R_crit, now=t0 + 6 * 3600 + 600, fetch=good)      # and not again
+    assert o.deliveries == []
+    o.store.close()
+
+
+def test_undelivered_flapping_alert_is_retried_next_cycle_not_6h_later(tmp_path):
+    cfg = config.parse({"apps": [{"name": "a", "health": {"url": "https://a.example.com/healthz"}}], "alerts": [NTFY],
+                        "data_dir": str(tmp_path), "confirm": 2, "flap": {"flips": 3, "cycles": 12, "remind_hours": 6}})
+    n = {"i": 0}
+
+    class R:
+        def __init__(self, *a, **k): pass
+        def run_app(self, app, now):
+            n["i"] += 1
+            yield "HEALTHZ", CheckResult("crit", "DOWN") if n["i"] % 2 else CheckResult("ok", "OK")
+
+    bad, good = Stub(status=500), Stub(body=b"{}")
+    got = []
+    for i in range(12):
+        o = runtime.run_once(cfg, runner_factory=R, now=1_000_000 + i * 300, fetch=bad if i < 4 else good)
+        got += [(i, d.decision.kind, d.delivered) for d in o.deliveries if d.decision.kind == "flapping"]
+        o.store.close()
+    failed = [g for g in got if not g[2]]
+    delivered = [g for g in got if g[2]]
+    assert failed and delivered and delivered[0][0] == failed[-1][0] + 1, got
+    assert len(delivered) == 1
