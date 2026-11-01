@@ -1,8 +1,11 @@
 """Glue for the CLI: load config, open the store, run one cycle."""
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -11,7 +14,8 @@ from . import alerts, net, secrets, version
 from . import config as cfgmod
 from . import cycle as cyc
 from .checks.runner import Runner
-from .store import Store
+from .state import AlertDecision
+from .store import Store, StoreError
 
 log = logging.getLogger("fleet_truth")
 DB_NAME = "fleet-truth.db"
@@ -21,14 +25,71 @@ def db_path(cfg: cfgmod.Config) -> Path:
     return Path(cfg.data_dir).expanduser() / DB_NAME
 
 
-def open_store(cfg: cfgmod.Config) -> Store:
+class RunLocked(Exception):
+    """Another run holds the data dir's run lock."""
+
+
+@contextlib.contextmanager
+def run_lock(cfg: cfgmod.Config):
+    """Exclusive non-blocking flock on <data_dir>/run.lock: two overlapping runs would send duplicate alerts."""
+    d = Path(cfg.data_dir).expanduser()
+    d.mkdir(parents=True, exist_ok=True)
+    fd = os.open(d / "run.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise RunLocked("another fleet-truth run holds the lock") from None
+        yield
+    finally:
+        os.close(fd)  # closing releases the flock
+
+
+def _move_aside(path: Path) -> Path:
+    """Rename a bad database (and its WAL/SHM files) out of the way. Never deletes."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = path.with_name(f"{path.name}.corrupt-{stamp}")
+    n = 0
+    while dest.exists():
+        n += 1
+        dest = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
+    for suffix in ("", "-wal", "-shm"):
+        src = path.with_name(path.name + suffix)
+        if src.exists():
+            os.rename(src, dest.with_name(dest.name + suffix))
+    return dest
+
+
+def open_store_checked(cfg: cfgmod.Config) -> tuple[Store, str | None]:
+    """Open the DB; returns (store, reset_note). A corrupt file is moved aside; a DB that vanished after a
+    previous run (marker present) is reported too. The note is None for a normal open."""
     d = Path(cfg.data_dir).expanduser()
     d.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(d, 0o700)
     except OSError:
         pass
-    return Store(db_path(cfg))
+    path = db_path(cfg)
+    marker = d / ".initialized"
+    note = None
+    existed = path.exists()
+    try:
+        store = Store(path)
+    except StoreError:
+        moved = _move_aside(path)
+        store = Store(path)
+        note = f"database was unusable and was moved to {moved.name}; history, alert de-duplication and channel health are reset"
+    else:
+        if not existed and marker.exists():
+            note = "database file was missing; history, alert de-duplication and channel health are reset"
+    if note:
+        store.meta_set("state_reset_at", str(int(time.time())))
+    marker.touch()
+    return store, note
+
+
+def open_store(cfg: cfgmod.Config) -> Store:
+    return open_store_checked(cfg)[0]
 
 
 def format_summary(cr: cyc.CycleResult) -> str:
@@ -52,21 +113,48 @@ def run_once(cfg: cfgmod.Config, *, runner_factory: Callable | None = None, now:
              get_secret: Callable[[str], str | None] = secrets.get) -> Outcome:
     """One cycle, then alerts, then the dead-man ping. A cycle error pings `/fail` and re-raises."""
     secrets.install_log_scrubber()
-    store = open_store(cfg)
     fetch_fn = fetch or net.fetch
+    stack = contextlib.ExitStack()
+    try:
+        stack.enter_context(run_lock(cfg))
+    except RunLocked:
+        raise
+    except Exception as e:  # cannot even create the lock/data dir
+        alerts.dead_man_ping(cfg, cycle_ok=False, error_class=type(e).__name__, channels_healthy=False,
+                             fetch=fetch_fn, get_secret=get_secret)
+        raise
+    with stack:
+        try:
+            store, reset_note = open_store_checked(cfg)
+        except Exception as e:
+            alerts.dead_man_ping(cfg, cycle_ok=False, error_class=type(e).__name__, channels_healthy=False,
+                                 fetch=fetch_fn, get_secret=get_secret)
+            raise
+        return _run_locked(cfg, store, reset_note, runner_factory, now, deadline_s, fetch, fetch_fn, senders, get_secret)
+
+
+def _run_locked(cfg, store, reset_note, runner_factory, now, deadline_s, fetch, fetch_fn, senders, get_secret) -> Outcome:
     kw = {"fetch": fetch} if fetch else {}
     runner = (runner_factory or Runner)(cfg, meta_get=store.meta_get, meta_set=store.meta_set, **kw)
     snd = alerts.build_senders(cfg, fetch_fn, get_secret) if senders is None else senders
     disp = alerts.Dispatcher(snd, store, alerts.page_url(cfg))
+    if reset_note:
+        # the corrupt/missing DB is itself a failure: tell the dead-man now, and below tell the humans
+        alerts.dead_man_ping(cfg, cycle_ok=False, error_class="StateReset", channels_healthy=False,
+                             fetch=fetch_fn, get_secret=get_secret)
     try:
         cr = cyc.run_cycle(cfg, store, runner, now=now, deadline_s=deadline_s)
     except Exception as e:
         alerts.dead_man_ping(cfg, cycle_ok=False, error_class=type(e).__name__, channels_healthy=disp.channels_healthy(),
                              fetch=fetch_fn, get_secret=get_secret, store=store)
         raise
-    deliveries = disp.dispatch(cr.decisions)
+    decisions = list(cr.decisions)
+    if reset_note:  # also the conservative channel re-test: this send is recorded, so a dead channel shows as failing
+        decisions.append(AlertDecision("reset", "_monitor", "STATE", "warn", "crit", "STATE_RESET", reset_note,
+                                       int(cr.started_at), 1))
+    deliveries = disp.dispatch(decisions)
     for d in deliveries:
-        if d.undelivered:  # nobody heard it: retry next cycle
+        if d.undelivered and d.decision.kind != "reset":  # nobody heard it: retry next cycle
             cyc.rollback_alert_state(store, d.decision)
     lost = any(d.undelivered for d in deliveries)
     # an alert nobody received means the monitor cannot do its job: say so through the dead-man, never "all good"

@@ -33,6 +33,9 @@ def _once(path: str) -> int:
         return 3
     try:
         out = runtime.run_once(cfg)
+    except runtime.RunLocked:
+        print("another fleet-truth run is in progress (run lock held); exiting without doing anything", file=sys.stderr)
+        return 5
     except Exception as e:  # noqa: BLE001 - CLI boundary: class name only, never a message that could hold secrets
         print(f"cycle failed: {type(e).__name__}", file=sys.stderr)
         return 4
