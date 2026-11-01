@@ -177,3 +177,32 @@ Mutation check: [wt-1-mvp-mutate-fixpass2.py](wt-1-mvp-mutate-fixpass2.py), 35 m
 
   -  `/proc/locks` on a real WSL2 kernel with the real backup library holding its lock (the sandbox's `/proc/locks` and a subprocess `flock` were used).  
   -  flock behaviour on `/mnt/c` (the sandbox cannot write there); only the error handling is tested, with `ENOLCK` injected.  
+
+
+# Fix pass 3 (after REVIEW3-wt-1-mvp.md, verdict "fix then ship")
+
+Mutation check: [wt-1-mvp-mutate-fixpass3.py](wt-1-mvp-mutate-fixpass3.py), 34 mutants of the new code, 33 killed (4 survived the first run: three needed a better test or a wider test selection and are now killed; one is equivalent, below). Details: [implementation-notes.md](../../wiki/implementation-notes.md) "Review 3 fix pass".
+
+## Per item
+
+  [1]  Episode hysteresis, re-open cooldown, flap declaration with `[FLAPPING]`/`[CRIT FLAPPING]`/`[STABLE]`, sustained hand-over, doubling quiet period: `tests/test_state.py` (hysteresis, reopen, 24 h bounds), `tests/test_flapping.py` (six storm patterns bounded at 12 messages a day, suppression of CRIT/OK pairs, STABLE, undo/retry), `tests/test_cycle.py`.  
+  [2]  `tests/test_dispatch.py`: the reviewer's probe (slow 2.5 s channel plus a fast one over four cycles: the fast channel delivers all four, the slow one is attempted once), an always-hanging channel (attempts at cycles 1, 5, 12, 25: backoff 3, 6, 12, 12), only-channel-hanging (no resend storm), late results and late state writes discarded, backoff cleared by a real delivery, the slow-drip SMTP stub next to a healthy channel (dead-man stays green), config keys.  
+  [3]  The reviewer's probe (A crit, A recovers while B blips unknown, then clean: no failed-send rows, dead-man never withheld, the shared base check goes UP at the first clean cycle, exactly once); the surviving mutant (an un-recovered alert keeps the shared check red) has its own test; skipped results are not recorded.  
+  [4]  Intermittent rule: 1-in-7 crit at 300 s and 21600 s intervals, single blips quiet, a long outage counts once, warn variant, clearing, heads.  
+  [5]  `tests/test_store.py`: a database written by the previous fix-pass schema with an alerted crit episode: reconstructed episode, and no new alert after upgrading whether the check then reads warn, unknown or crit.  
+  [6]  (a) tls.host `127.0.0.1:22` refused while the health URL keeps its flag; (b) deadline validation with numbers, effective deadline used by the cycle, stale-run report once per stuck run, young holder not reported; (c) `test-alert` exit 5 when a run holds the lock, a corrupt database untouched (byte for byte, no `.corrupt-*`).  
+
+## Judgment calls to confirm
+
+  -  A single ok cycle no longer ends an episode (recover_after 2): the [OK] arrives one cycle later, and `crit, ok, crit` is one episode (it alerts at the second failure; before it needed two failures in a row).  
+  -  `[FLAPPING]` suppresses that check's individual alerts and recoveries until `[STABLE]`; a failure lasting a whole flap window re-emits a real `[CRIT] ... sustained failure` instead of staying hidden.  
+  -  The default check deadline is no longer 80% of the interval: it is `min(0.8 x interval, 0.9 x interval - alert budget - 10 s)` (200 s at 300 s). A suppression-by-correlation episode now needs `confirm` fresh cycles after the suppression ends.  
+  -  Per-day message bound in the simulator is 20 (storm patterns are checked tighter, at 12, separately).  
+
+## Equivalent mutant
+
+  -  "late results applied" (dropping the `ctx.closed` check before storing a result): the dispatcher reads results from a snapshot taken at close, so a late write has no effect either way; the guard is kept as defence in depth. Late *state* writes (the part that could matter) are covered by their own mutant and test.  
+
+## Deferred / not done
+
+  -  Nothing from the review list is deferred. Still open from earlier passes: `heartbeat.url`, `MONITOR_SELF`, `probe_via_proxy`, silences (card [12]); a real-kernel check of `/proc/locks` and flock on `/mnt/c` (unverifiable here).  

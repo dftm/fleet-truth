@@ -86,13 +86,16 @@ def test_late_results_are_discarded_and_never_applied(tmp_path):
         name, min_status = "late", "info"
         wrote = None
 
+        saved = None
+
         def bind(self, state):
-            self.st = state
+            if state is not None:
+                self.saved = state         # keep the proxy the way a slow worker would
 
         def send(self, msg):
             time.sleep(0.4)
-            if self.st:
-                self.st.set("hc:late:base", "down")       # state write after the dispatch closed
+            if self.saved:
+                self.saved.set("hc:late:base", "down")    # state write after the dispatch closed
             return alerts.SendResult(True)
 
     late = Late()

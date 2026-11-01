@@ -151,3 +151,35 @@ def test_intermittent_config_and_message_heads():
     assert mk("flapping", "warn").startswith("[FLAPPING] a c")
     assert mk("stable", "crit").startswith("[STABLE] a c")
     assert mk("intermittent", "crit").startswith("[INTERMITTENT] a c (crit)")
+
+
+def test_a_sustained_failure_during_flapping_is_handed_back_to_normal_alerting(tmp_path):
+    seq = [CRIT, OK] * 4 + [CRIT] * 30
+    out, _ = drive(tmp_path, seq, len(seq), name="sus")
+    kinds = [(i, d.kind, d.level) for i, d in out]
+    assert ("sustained", "crit") in [(k, lv) for _, k, lv in kinds], kinds
+    i_sus = [i for i, k, _ in kinds if k == "sustained"][0]
+    assert 16 <= i_sus <= 26      # a whole flap window (12 cycles) without a flip
+    assert "flapping" in [k for i, k, _ in kinds if i < i_sus]
+
+
+def test_flap_stable_flap_again_needs_a_longer_quiet_period(tmp_path):
+    store = Store(tmp_path / "q.db")
+    args = dict(flips=4, cycles=12, remind_hours=6, clear_cycles=3, window_cycles=48, min_failures=99)
+    prev, t, msgs = "ok", 2000, []
+
+    def run(seq):
+        nonlocal prev, t
+        for st in seq:
+            o = flap.step(store, "a", "c", prev, st, t, 300, **args)
+            if o.decision:
+                msgs.append((t, o.decision[0]))
+            prev, t = st, t + 300
+
+    run(["crit", "ok"] * 3)               # flapping declared
+    run(["ok"] * 3)                       # 3 ok in a row: stable
+    run(["crit", "ok"] * 3)               # flapping again within a day: now 6 quiet cycles are needed
+    run(["ok"] * 3)
+    assert [k for _, k in msgs] == ["flapping", "stable", "flapping"], msgs     # not stable yet after 3
+    run(["ok"] * 3)
+    assert [k for _, k in msgs][-1] == "stable"
