@@ -53,8 +53,9 @@ def test_allow_private_accepts_rfc1918_and_tailnet_but_never_loopback_or_linkloc
         assert net.blocked_reason(ipaddress.ip_address(ip), True) is not None, ip
     assert net.blocked_reason(ipaddress.ip_address("93.184.216.34"), False) is None
     assert net.blocked_reason(ipaddress.ip_address("2606:2800:220:1:248:1893:25c8:1946"), False) is None
-    # IPv6 ULA is not on the allow_private list
-    assert net.blocked_reason(ipaddress.ip_address("fd7a:115c:a1e0::1"), True) is not None
+    # IPv6 ULA (Tailscale's fd7a:115c:a1e0::/48 among it) is admitted by allow_private only
+    assert net.blocked_reason(ipaddress.ip_address("fd7a:115c:a1e0::1"), True) is None
+    assert net.blocked_reason(ipaddress.ip_address("fd7a:115c:a1e0::1"), False) is not None
 
 
 def test_mixed_public_and_private_answers_refused():
@@ -236,3 +237,144 @@ def test_unopted_fetch_to_public_name_cannot_touch_network():
     # resolver injected, so no lookup; a connect attempt would raise NetBlocked (AssertionError)
     with pytest.raises(NetBlocked):
         net.fetch("https://app.example.com/", resolver=res_to("93.184.216.34"))
+
+
+# ------------------------------------------------------------------ review F9: policy edges
+META = ["169.254.169.254", "169.254.170.2", "100.100.100.200", "168.63.129.16", "fd00:ec2::254",
+        "::ffff:169.254.169.254", "::ffff:100.100.100.200", "64:ff9b::a9fe:a9fe", "2002:a9fe:a9fe::"]
+SPECIAL = ["fec0::1", "fec0:1234::5", "feff::1", "192.0.0.8", "198.18.0.1", "198.19.255.1", "240.0.0.1", "255.255.255.255",
+           "192.88.99.1", "0.1.2.3", "64:ff9b:1::1", "::ffff:198.18.0.1"]
+
+
+@pytest.mark.parametrize("addr", META)
+@pytest.mark.parametrize("allow_private", [False, True])
+def test_cloud_metadata_addresses_are_never_allowed(addr, allow_private):
+    assert net.blocked_reason(ipaddress.ip_address(addr), allow_private) is not None
+    host = f"[{addr}]" if ":" in addr else addr
+    with pytest.raises(net.FetchError) as e:
+        net.fetch(f"https://{host}/", allow_private=allow_private)
+    assert e.value.kind == "BLOCKED"
+
+
+@pytest.mark.parametrize("addr", SPECIAL)
+@pytest.mark.parametrize("allow_private", [False, True])
+def test_site_local_and_special_ranges_refused_regardless_of_allow_private(addr, allow_private):
+    assert net.blocked_reason(ipaddress.ip_address(addr), allow_private) is not None
+
+
+def test_name_resolving_to_metadata_refused_even_with_allow_private():
+    for ip in ("100.100.100.200", "169.254.169.254", "fd00:ec2::254"):
+        with pytest.raises(net.FetchError) as e:
+            net.fetch("https://innocent.example.com/", allow_private=True, resolver=res_to("93.184.216.34", ip))
+        assert e.value.kind == "BLOCKED"
+
+
+@pytest.mark.parametrize("host", ["metadata.google.internal", "METADATA.GOOGLE.INTERNAL.", "x.metadata.google.internal",
+                                  "metadata", "instance-data", "metadata.goog", "instance-data.ec2.internal"])
+def test_metadata_hostnames_refused_before_any_lookup(host):
+    calls = []
+
+    def resolver(h, p, type=0):
+        calls.append(h)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", p))]
+
+    for ap, scheme in ((False, "https"), (True, "http")):
+        with pytest.raises(net.FetchError) as e:
+            net.fetch(f"{scheme}://{host}/computeMetadata/v1/", allow_private=ap, resolver=resolver)
+        assert e.value.kind == "BLOCKED"
+    assert calls == []
+
+
+@pytest.mark.parametrize("url", ["https://example.com:0/", "https://example.com:65536/", "https://example.com:99999/",
+                                 "https://example.com:-1/", "https://example.com:x/"])
+def test_bad_ports_rejected(url):
+    with pytest.raises(net.FetchError) as e:
+        net.fetch(url, resolver=res_to("93.184.216.34"))
+    assert e.value.kind == "BAD_URL"
+
+
+def test_bad_ports_rejected_at_config_load():
+    base = {"apps": [{"name": "a", "health": {"url": "https://a.example.com:0/"}}]}
+    with pytest.raises(config.ConfigError) as e:
+        config.parse(base)
+    assert "port" in e.value.errors[0]
+    for bad in ("https://a.example.com:70000/", "https://a.example.com:0/x"):
+        with pytest.raises(config.ConfigError):
+            config.parse({"apps": [{"name": "a", "version": {"url": bad}}]})
+    for host in ("a.example.com:0", "a.example.com:99999", "https://a.example.com", "a.example.com/x", "u@a.example.com", ""):
+        with pytest.raises(config.ConfigError):
+            config.parse({"apps": [{"name": "a", "tls": {"host": host}}]})
+    assert config.parse({"apps": [{"name": "a", "tls": {"host": "a.example.com:8443"}}]}).apps[0].tls.host == "a.example.com:8443"
+    with pytest.raises(config.ConfigError):
+        config.parse({"apps": [{"name": "a"}], "alerts": [{"type": "email", "smtp_host": "h", "smtp_port": 70000,
+                                                           "from": "a@b.c", "to": "a@b.c"}]})
+
+
+def test_dns_resolution_counts_inside_the_time_limit():
+    gate = threading.Event()
+
+    def slow(host, port, type=0):
+        gate.wait(5)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(net.FetchError) as e:
+            net.fetch("https://slow.example.com/", timeout_s=0.5, resolver=slow)
+        assert e.value.kind == "TIMEOUT" and "lookup" in e.value.message and time.monotonic() - t0 < 2.0
+        t0 = time.monotonic()
+        with pytest.raises(net.FetchError) as e:
+            net.peer_cert("https://slow.example.com/", timeout_s=0.5, resolver=slow)
+        assert e.value.kind == "TIMEOUT" and time.monotonic() - t0 < 2.0
+    finally:
+        gate.set()
+
+
+# ------------------------------------------------------------------ review (g): layers proven alone, version independent
+@pytest.fixture
+def stdlib_says_everything_is_fine(monkeypatch):
+    """Neutralise every stdlib ipaddress classification so ONLY Fleet Truth's own rules can refuse an address
+    (what Python 3.12 and 3.14 disagree about no longer matters)."""
+    for cls in (ipaddress.IPv4Address, ipaddress.IPv6Address):
+        for name in ("is_loopback", "is_link_local", "is_multicast", "is_unspecified", "is_reserved", "is_private",
+                     "is_site_local"):
+            monkeypatch.setattr(cls, name, property(lambda self: False), raising=False)
+        monkeypatch.setattr(cls, "is_global", property(lambda self: True))
+
+
+@pytest.mark.parametrize("addr", ["127.0.0.1", "::1", "169.254.1.1", "fe80::1", "224.0.0.1", "ff02::1", "0.0.0.0", "::",
+                                  "::ffff:127.0.0.1", "::ffff:169.254.1.1", "64:ff9b::7f00:1", "2002:7f00:1::", "::127.0.0.1",
+                                  "::ffff:224.0.0.1"] + META + SPECIAL)
+@pytest.mark.parametrize("allow_private", [False, True])
+def test_own_rules_refuse_without_any_help_from_stdlib(stdlib_says_everything_is_fine, addr, allow_private):
+    assert net.blocked_reason(ipaddress.ip_address(addr), allow_private) is not None
+
+
+def test_embedded_ipv4_unwrap_layer_alone(stdlib_says_everything_is_fine):
+    """An address the (neutralised) stdlib calls global, whose embedded IPv4 is on Fleet Truth's own list."""
+    for addr in ("::ffff:198.18.0.1", "::ffff:100.100.100.200", "64:ff9b::c612:1", "2002:c612:1::", "::198.18.0.1"):
+        ip = ipaddress.ip_address(addr)
+        assert net.blocked_reason(ip, False).endswith("(embedded in IPv6 form)"), addr
+        assert net.blocked_reason(ip, True).endswith("(embedded in IPv6 form)"), addr
+
+
+def test_public_addresses_still_pass_under_the_neutralised_stdlib(stdlib_says_everything_is_fine):
+    assert net.blocked_reason(ipaddress.ip_address("93.184.216.34"), False) is None
+    assert net.blocked_reason(ipaddress.ip_address("10.1.2.3"), True) is None
+
+
+@pytest.mark.loopback
+def test_declared_size_layer_alone_fails_fast_without_reading_the_body():
+    def lie(w):
+        w.write(b"HTTP/1.1 200 OK\r\nContent-Length: 99999999\r\n\r\n")
+        w.flush()
+        time.sleep(3)  # never sends the body: only the declared-length check can answer quickly
+
+    srv = FakeServer(lambda r: lie)
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(net.FetchError) as e:
+            net.fetch(srv.url(), allow_private=True, timeout_s=8, _hooks=LO)
+        assert e.value.kind == "TOO_LARGE" and time.monotonic() - t0 < 1.5
+    finally:
+        srv.close()

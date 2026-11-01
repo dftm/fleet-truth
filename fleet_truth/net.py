@@ -38,7 +38,25 @@ USER_AGENT = f"fleet-truth/{version.read_version()}"
 _PRIVATE_OK = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
 _THIS_NETWORK = ipaddress.ip_network("0.0.0.0/8")
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
-_METADATA_V6 = ipaddress.ip_address("fd00:ec2::254")
+_METADATA_IPS = frozenset(ipaddress.ip_address(a) for a in (
+    "169.254.169.254", "169.254.170.2", "100.100.100.200", "168.63.129.16", "fd00:ec2::254"))
+_METADATA_HOSTS = ("metadata", "metadata.google.internal", "metadata.goog", "instance-data", "instance-data.ec2.internal",
+                   "metadata.azure.com", "metadata.tencentyun.com", "metadata.platformequinix.com")
+# special-purpose ranges refused regardless of allow_private (some are not covered by is_global on older Pythons)
+_ALWAYS_BLOCKED = tuple(ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "192.0.0.0/24", "192.88.99.0/24", "198.18.0.0/15", "240.0.0.0/4", "fec0::/10", "64:ff9b:1::/48", "100::/64"))
+_ULA = ipaddress.ip_network("fc00::/7")
+# Explicit ranges next to the stdlib is_* properties: the verdict must not depend on which Python version
+# classifies which range (3.12 and 3.14 differ for mapped and embedded forms).
+_NET = ipaddress.ip_network
+_LOOPBACK_NETS = (_NET("127.0.0.0/8"), _NET("::1/128"))
+_LINK_LOCAL_NETS = (_NET("169.254.0.0/16"), _NET("fe80::/10"))
+_MULTICAST_NETS = (_NET("224.0.0.0/4"), _NET("ff00::/8"))
+_UNSPECIFIED_NETS = (_NET("0.0.0.0/32"), _NET("::/128"))
+
+
+def _in(ip, nets) -> bool:
+    return any(ip.version == n.version and ip in n for n in nets)
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _V4_COMPAT = ipaddress.ip_network("::/96")
 
@@ -95,21 +113,23 @@ def blocked_reason(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, allow_priv
             r = blocked_reason(v4, allow_private, allow_loopback)
             if r:
                 return f"{r} (embedded in IPv6 form)"
-        if ip == _METADATA_V6:
-            return "cloud metadata address"
-    if ip.is_loopback:
+    if ip in _METADATA_IPS:
+        return "cloud metadata address (never allowed)"
+    if ip.is_loopback or _in(ip, _LOOPBACK_NETS):
         return None if allow_loopback else "loopback address"
-    if ip.is_link_local:
+    if ip.is_link_local or _in(ip, _LINK_LOCAL_NETS):
         return "link-local address (includes cloud metadata)"
-    if ip.is_multicast:
+    if ip.is_multicast or _in(ip, _MULTICAST_NETS):
         return "multicast address"
-    if ip.is_unspecified:
+    if ip.is_unspecified or _in(ip, _UNSPECIFIED_NETS):
         return "unspecified address"
     if ip.is_reserved:
         return "reserved address"
-    if isinstance(ip, ipaddress.IPv4Address) and ip in _THIS_NETWORK:
-        return "0.0.0.0/8 address"
+    if any(ip.version == n.version and ip in n for n in _ALWAYS_BLOCKED):
+        return "special-purpose or site-local range (never allowed)"
     if allow_private and isinstance(ip, ipaddress.IPv4Address) and any(ip in n for n in _PRIVATE_OK):
+        return None
+    if allow_private and isinstance(ip, ipaddress.IPv6Address) and ip in _ULA:
         return None
     if ip.is_global and not (isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT):
         return None
@@ -147,6 +167,8 @@ def parse_url(url: str, allow_private: bool) -> Target:
         port = s.port
     except ValueError:
         raise FetchError("BAD_URL", "URL is not valid") from None
+    if port is not None and not 1 <= port <= 65535:
+        raise FetchError("BAD_URL", "port out of range")
     if s.scheme not in ("http", "https"):
         raise FetchError("BAD_URL", "scheme must be https (or http with allow_private)")
     if s.scheme == "http" and not allow_private:
@@ -158,6 +180,9 @@ def parse_url(url: str, allow_private: bool) -> Target:
         raise FetchError("BAD_URL", "URL has no host")
     if "%" in host or not host.isascii():
         raise FetchError("BAD_URL", "host must be plain ASCII without zone id")
+    bare = host.rstrip(".")
+    if any(bare == m or bare.endswith("." + m) for m in _METADATA_HOSTS):
+        raise FetchError("BLOCKED", f"{host} is a cloud metadata hostname (never allowed)")
     literal = None
     try:
         literal = ipaddress.ip_address(host)
@@ -170,8 +195,30 @@ def parse_url(url: str, allow_private: bool) -> Target:
     return Target(s.scheme, host, port or (443 if s.scheme == "https" else 80), path, literal)
 
 
+def _resolve_bounded(res: Callable, host: str, port: int, timeout_s: float | None):
+    """Run the lookup in a daemon thread so a stuck resolver cannot outlive the probe's time limit."""
+    if timeout_s is None:
+        return res(host, port, type=socket.SOCK_STREAM)
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["r"] = res(host, port, type=socket.SOCK_STREAM)
+        except BaseException as e:  # noqa: BLE001
+            box["e"] = e
+
+    t = threading.Thread(target=run, daemon=True, name="ft-resolve")
+    t.start()
+    t.join(max(timeout_s, 0.05))
+    if t.is_alive():
+        raise FetchError("TIMEOUT", f"name lookup for {host} timed out")
+    if "e" in box:
+        raise box["e"]
+    return box["r"]
+
+
 def validate_addresses(target: Target, allow_private: bool, resolver: Callable | None,
-                       hooks: TestHooks | None) -> list[str]:
+                       hooks: TestHooks | None, timeout_s: float | None = None) -> list[str]:
     """Resolve target.host once and return the validated IPs. Raises BLOCKED if any answer is bad."""
     allow_lo = bool(hooks and hooks.allow_loopback)
     if target.literal_ip is not None:
@@ -179,7 +226,7 @@ def validate_addresses(target: Target, allow_private: bool, resolver: Callable |
     else:
         res = resolver if resolver is not None else socket.getaddrinfo
         try:
-            infos = res(target.host, target.port, type=socket.SOCK_STREAM)
+            infos = _resolve_bounded(res, target.host, target.port, timeout_s)
         except OSError:
             raise FetchError("DNS", f"cannot resolve {target.host}") from None
         ips = []
@@ -312,11 +359,15 @@ def fetch(url: str, headers: dict | None = None, allow_private: bool = False, me
     if method not in ("GET", "HEAD", "POST"):
         raise FetchError("BAD_URL", "method not allowed")
     target = parse_url(url, allow_private)
-    ips = validate_addresses(target, allow_private, resolver, _hooks)
+    watch = _Watch(timeout_s)  # the limit covers name resolution too
+    try:
+        ips = validate_addresses(target, allow_private, resolver, _hooks, timeout_s)
+    except BaseException:
+        watch.stop()
+        raise
     hdrs = {"User-Agent": USER_AGENT, "Accept": "*/*", "Connection": "close"}
     for k, v in (headers or {}).items():
         hdrs[str(k)] = str(v)
-    watch = _Watch(timeout_s)
     conn = None
     try:
         cls = _PinnedHTTPS if target.scheme == "https" else _PinnedHTTP
@@ -383,9 +434,13 @@ def peer_cert(url: str, allow_private: bool = False, timeout_s: float = 10.0,
     target = parse_url(url, allow_private)
     if target.scheme != "https":
         raise FetchError("BAD_URL", "TLS check needs an https URL")
-    ips = validate_addresses(target, allow_private, resolver, _hooks)
     watch = _Watch(timeout_s)
     sock = None
+    try:
+        ips = validate_addresses(target, allow_private, resolver, _hooks, timeout_s)
+    except BaseException:
+        watch.stop()
+        raise
     try:
         sock, ip = _pinned_connect(target, ips, _tls_context(_hooks), watch)
         return ip, _not_after(sock)

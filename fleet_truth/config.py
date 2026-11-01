@@ -311,9 +311,12 @@ def _url(v: Any, path: str, ctx: _Ctx, allow_private: bool, public_only: bool = 
     try:
         s = urlsplit(u)
         host = s.hostname
-        s.port  # noqa: B018 - raises ValueError on a bad port
+        port = s.port  # raises ValueError on a non-numeric or >65535 port
     except ValueError:
-        ctx.err(path, "not a valid URL")
+        ctx.err(path, "not a valid URL (or port out of range)")
+        return None
+    if port is not None and not 1 <= port <= 65535:
+        ctx.err(path, "port must be 1-65535")
         return None
     if s.scheme not in ("http", "https"):
         ctx.err(path, "scheme must be https:// (or http:// with allow_private: true)")
@@ -341,6 +344,16 @@ def _merge(base: dict | None, over: dict | None) -> dict:
 
 
 # ----------------------------------------------------------------------------- sections
+def _tls_host(d: dict, path: str, ctx: _Ctx) -> str | None:
+    h = _str(d, "host", path, ctx)
+    if h is None:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9.\-]+(:\d{1,5})?|\[[0-9A-Fa-f:.]+\](:\d{1,5})?", h) or _url("https://" + h + "/", path + ".host", ctx, False) is None:
+        ctx.err(f"{path}.host", "must be host or host:port (no scheme, path or credentials; port 1-65535)")
+        return None
+    return h
+
+
 def _alert(raw: Any, path: str, ctx: _Ctx) -> AlertCfg | None:
     if not isinstance(raw, dict):
         ctx.err(path, "must be a mapping")
@@ -383,6 +396,8 @@ def _alert(raw: Any, path: str, ctx: _Ctx) -> AlertCfg | None:
     elif typ == "email":
         kw["smtp_host"] = _str(d, "smtp_host", path, ctx)
         kw["smtp_port"] = int(_num(d, "smtp_port", path, ctx, 587, 1, integer=True))
+        if not 1 <= kw["smtp_port"] <= 65535:
+            ctx.err(f"{path}.smtp_port", "port must be 1-65535")
         kw["from_addr"] = _str(d, "from", path, ctx)
         kw["to_addr"] = _str(d, "to", path, ctx)
         for k in ("smtp_host", "from_addr", "to_addr"):
@@ -487,7 +502,7 @@ def _app(raw: Any, path: str, defaults: dict, ctx: _Ctx) -> App | None:
         drift=DriftCfg(float(_num(drift, "grace_hours", f"{path}.drift", ctx, 24.0, 0))),
         unpushed=UnpushedCfg(float(_num(unp, "max_age_hours", f"{path}.unpushed", ctx, 24.0, 0)),
                              float(_num(unp, "dirty_hours", f"{path}.unpushed", ctx, 24.0, 0))),
-        tls=TlsCfg(_str(tls, "host", f"{path}.tls", ctx),
+        tls=TlsCfg(_tls_host(tls, f"{path}.tls", ctx),
                    float(_num(tls, "warn_days", f"{path}.tls", ctx, 21.0, 0)),
                    float(_num(tls, "crit_days", f"{path}.tls", ctx, 7.0, 0)),
                    float(_num(tls, "every_hours", f"{path}.tls", ctx, 6.0, 0.001))),

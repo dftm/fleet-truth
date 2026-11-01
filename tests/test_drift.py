@@ -289,3 +289,15 @@ def test_protocols_are_limited_in_every_fetch(R):
                 assert needle in joined
     finally:
         gm.ARGV_LOG = None
+
+
+# ------------------------------------------------------------------ both no-lock layers are present on their own
+def test_status_runs_with_both_optional_lock_guards(R):
+    gm.ARGV_LOG = []
+    try:
+        gm.dirty_files(R.repo)
+        status = [a for a in gm.ARGV_LOG if "status" in a][0]
+        assert "--no-optional-locks" in status                     # layer 1: the flag
+        assert gm._env()["GIT_OPTIONAL_LOCKS"] == "0"              # layer 2: the environment
+    finally:
+        gm.ARGV_LOG = None

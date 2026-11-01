@@ -682,3 +682,22 @@ def test_blind_level_config():
     assert config.parse({**base, "blind_level": "warn"}).blind_level == "warn"
     with pytest.raises(config.ConfigError):
         config.parse({**base, "blind_level": "info"})
+
+
+def test_each_scrub_layer_works_alone(tmp_path):
+    secrets.register("TG_TOKEN")
+    # layer 1: _fail() scrubs what a sender reports
+    assert TOKEN not in alerts._fail(net.FetchError("CONNECT", f"x {TOKEN}")).error
+    assert TOKEN not in alerts._fail(f"y {TOKEN}").error
+
+    # layer 2: the Dispatcher scrubs before logging or storing, even if a sender forgot to
+    class Careless:
+        name, min_status = "careless", "info"
+
+        def send(self, msg):
+            return alerts.SendResult(False, f"raw error with {TOKEN}")
+
+    store = Store(tmp_path / "t.db")
+    out = alerts.Dispatcher([Careless()], store, "u")._send(Careless(), alerts.format_message(decision(), "u"))
+    assert TOKEN not in out.error
+    assert TOKEN not in store.db.execute("SELECT error FROM alerts").fetchone()[0]

@@ -235,7 +235,7 @@ def _default_smtp_factory(host: str, port: int, resolver=None, hooks=None,
     except ValueError:
         literal = None
     t = net.Target("smtp", host, port, "/", literal)
-    ips = net.validate_addresses(t, False, resolver, hooks)
+    ips = net.validate_addresses(t, False, resolver, hooks, timeout)
     smtp = _PinnedSMTP(ips, timeout)
     try:
         code, _msg = smtp.connect(host, port)
