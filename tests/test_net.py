@@ -87,9 +87,13 @@ def test_url_hygiene():
 def test_config_cannot_reach_the_loopback_hook():
     import inspect
     assert "_hooks" in inspect.signature(net.fetch).parameters
-    for needle in ("allow_loopback", "TestHooks", "_hooks"):
+    for needle in ("TestHooks", "_hooks"):
         assert needle not in inspect.getsource(config)
+    # the owner-facing per-URL flag exists, but only for a literal loopback host
     d = {"apps": [{"name": "a", "health": {"url": "https://a.example.com/", "allow_loopback": True}}]}
+    with pytest.raises(config.ConfigError):
+        config.parse(d)
+    d = {"apps": [{"name": "a", "health": {"url": "https://a.example.com/", "allow_everything": True}}]}
     with pytest.raises(config.ConfigError):
         config.parse(d)
 
@@ -378,3 +382,100 @@ def test_declared_size_layer_alone_fails_fast_without_reading_the_body():
         assert e.value.kind == "TOO_LARGE" and time.monotonic() - t0 < 1.5
     finally:
         srv.close()
+
+
+# ------------------------------------------------------------------ review 2 R10: per-URL allow_loopback
+class LoServer:
+    def __enter__(self):
+        self.srv = FakeServer(lambda r: (200, {}, b'{"ok": true}'))
+        return self.srv
+
+    def __exit__(self, *a):
+        self.srv.close()
+
+
+@pytest.mark.loopback
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "LOCALHOST"])
+def test_allow_loopback_admits_a_literal_loopback_host_with_no_test_hook(host):
+    with LoServer() as srv:
+        url = f"http://{host}:{srv.port}/healthz"
+        r = net.fetch(url, allow_loopback=True, resolver=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no DNS")))
+        assert r.status == 200 and r.peer_ip in ("127.0.0.1", "::1")
+        # flag absent: every card-3 refusal still holds
+        for kw, kind in (({}, "BAD_URL"), ({"allow_private": True}, "BLOCKED")):   # plain http needs a flag at all
+            with pytest.raises(net.FetchError) as e:
+                net.fetch(url, **kw)
+            assert e.value.kind == kind
+        assert len(srv.requests) == 1
+
+
+@pytest.mark.loopback
+def test_allow_loopback_does_not_resolve_names_to_loopback():
+    with LoServer() as srv:
+        calls = []
+
+        def resolver(h, p, type=0):
+            calls.append(h)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", p))]
+
+        for name in ("evil.example.com", "app.local", "localhost.evil.com", "localhost."):
+            with pytest.raises(net.FetchError) as e:
+                net.fetch(f"http://{name}:{srv.port}/", allow_loopback=True, allow_private=True, resolver=resolver)
+            assert e.value.kind in ("BLOCKED", "BAD_URL"), name
+        assert not srv.requests
+        # mixed answers (public + loopback) are refused too
+        with pytest.raises(net.FetchError) as e:
+            net.fetch("https://evil.example.com/", allow_loopback=True, resolver=res_to("93.184.216.34", "127.0.0.1"))
+        assert e.value.kind == "BLOCKED"
+
+
+@pytest.mark.parametrize("url", ["http://10.0.0.5/", "http://192.168.1.1/", "http://100.100.40.10/", "http://169.254.169.254/",
+                                 "http://100.100.100.200/", "http://0.0.0.0/", "http://[fd00:ec2::254]/", "http://[::ffff:127.0.0.1]/",
+                                 "http://[fe80::1]/", "http://224.0.0.1/", "http://metadata.google.internal/", "http://[::]/",
+                                 "http://2130706433/", "http://127.1/"])
+def test_allow_loopback_admits_no_other_address_class(url):
+    with pytest.raises(net.FetchError) as e:
+        net.fetch(url, allow_loopback=True, resolver=res_to("93.184.216.34"))
+    assert e.value.kind in ("BLOCKED", "BAD_URL")
+
+
+def test_allow_loopback_does_not_widen_allow_private_and_vice_versa():
+    for ip in ("10.1.2.3", "100.100.40.10"):
+        t = net.parse_url(f"https://{ip}/", True, True)
+        assert net.validate_addresses(t, True, None, None, None, True) == [ip]        # allow_private still does that
+        with pytest.raises(net.FetchError):
+            net.validate_addresses(net.parse_url(f"https://{ip}/", False, True), False, None, None, None, True)
+    with pytest.raises(net.FetchError):                                                # allow_private never admits loopback
+        net.validate_addresses(net.parse_url("https://127.0.0.1/", True), True, None, None)
+
+
+def test_allow_loopback_config_rules():
+    ok = {"apps": [{"name": "a", "health": {"url": "http://127.0.0.1:8790/healthz", "allow_loopback": True},
+                    "version": {"url": "http://localhost:8790/api/version", "allow_loopback": True}}]}
+    cfg = config.parse(ok)
+    assert cfg.apps[0].health.allow_loopback and cfg.apps[0].version.allow_loopback
+    assert not config.parse({"apps": [{"name": "a", "health": {"url": "https://a.example.com/"}}]}).apps[0].health.allow_loopback
+    with pytest.raises(config.ConfigError) as e:   # flag absent: http to loopback is still an error
+        config.parse({"apps": [{"name": "a", "health": {"url": "http://127.0.0.1:8790/healthz"}}]})
+    assert "allow_loopback" in e.value.errors[0]
+    for bad in ("http://app.example.com/", "http://10.0.0.5/", "https://[::ffff:127.0.0.1]/", "http://localhost.evil.com/",
+                "http://169.254.169.254/"):
+        with pytest.raises(config.ConfigError) as e:
+            config.parse({"apps": [{"name": "a", "health": {"url": bad, "allow_loopback": True}}]})
+        assert "allow_loopback" in e.value.errors[0], bad
+    assert config.parse({"apps": [{"name": "a", "health": {"url": "http://[::1]:80/", "allow_loopback": True}}]})
+
+
+@pytest.mark.loopback
+def test_healthz_and_deep_probe_use_the_flag_end_to_end():
+    from fleet_truth.checks import http as H
+    with LoServer() as srv:
+        cfg = config.parse({"apps": [{"name": "a", "health": {"url": f"http://127.0.0.1:{srv.port}/healthz", "allow_loopback": True,
+                                                              "expect_json": {"ok": True}},
+                                      "version": {"url": f"http://localhost:{srv.port}/api/version", "allow_loopback": True}}]})
+        app = cfg.apps[0]
+        assert H.healthz(app, net.fetch).status == "ok"                      # default fetcher, no test hook
+        assert H.deep_probe(app, cfg.credentials, net.fetch).status == "ok"
+        off = config.parse({"apps": [{"name": "a", "health": {"url": f"http://127.0.0.1:{srv.port}/healthz", "allow_private": True}}]}).apps[0]
+        r = H.healthz(off, net.fetch)
+        assert (r.status, r.verdict) == ("unknown", "BLOCKED_TARGET")        # without the flag it is refused

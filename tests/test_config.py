@@ -46,8 +46,8 @@ def test_unknown_key_reports_path():
     d["bogus"] = 1
     assert any(e.startswith("bogus: unknown key") for e in errors_of(d))
     d = base()
-    d["apps"][0]["health"]["allow_loopback"] = True  # no config key can ever disable the SSRF floor
-    assert any("allow_loopback: unknown key" in e for e in errors_of(d))
+    d["apps"][0]["health"]["allow_everything"] = True  # no config key can ever disable the SSRF floor
+    assert any("allow_everything: unknown key" in e for e in errors_of(d))
 
 
 def test_duplicate_and_bad_names():

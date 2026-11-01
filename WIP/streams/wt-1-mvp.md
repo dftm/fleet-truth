@@ -140,3 +140,40 @@ Totals: **416 tests pass** (baseline 236, +180) in about 23 s, also from a fresh
 
   -  Real SMTP providers (STARTTLS negotiation, AUTH mechanisms beyond what smtplib picks) were exercised only against the loopback stub.  
   -  Python 3.12 is still not available to run; the version-dependent layers are now covered by stdlib-neutralising tests instead.  
+
+
+# Fix pass 2 (after REVIEW2-wt-1-mvp.md, verdict "fix then ship")
+
+Mutation check: [wt-1-mvp-mutate-fixpass2.py](wt-1-mvp-mutate-fixpass2.py), 35 mutants of the new code, 33 killed after two tests were added for survivors, 2 explained (below). Details of every change: [implementation-notes.md](../../wiki/implementation-notes.md) "Review 2 fix pass".
+
+## Per item
+
+  [R1]  `tests/test_state.py` (episode tests incl. the 24 h crit/unknown alternation with reminders, crit then five unknowns, genuine recovery ends the episode, blind then crit, ok oscillation still silent), `tests/test_cycle.py` (alternation is one real alert; flapping crit vs warn), `test_crit_unknown_alternation_for_24h_reaches_a_crit_only_channel` (288 `run_once` cycles through a crit-only Telegram channel).  
+  [R2]  Four loopback-TLS tests assert the HTTP calls actually made (`/fail`, `/log`, base, per-app URL), 2xx-only delivery, the withheld success ping while another app is down, and runtime-computed clear flags.  
+  [R3]  Reference-down-for-a-day (288 cycles), undelivered cap, cap restart, reference independence validation, delivery alone ends suppression.  
+  [R4]  ENOLCK/EACCES/EINVAL/EIO give `LockError`, `/fail` and exit 4; real contention stays exit 5; `/mnt` warning.  
+  [R5]  Undelivered reminder and undelivered flapping alert are retried on the next cycle.  
+  [R6]  Fresh-ok hung-backup becomes `LOCK_STUCK`; whole-data-dir wipe is detected; marker sits next to the config.  
+  [R7]  `/proc/locks` parsing (inode and device must both match), status fallback, real `flock` held by a subprocess is seen, and `fcntl.flock/lockf` replaced by a bomb proves the monitor never locks.  
+  [R8]  Newer schema refused with the file byte-identical across three runs; corrupt copies capped at 3 with the first kept.  
+  [R9]  A slow-drip SMTP stub cannot push a run past `alert_budget_seconds`; the second alert is not even attempted; both are rolled back.  
+  [R10]  Flag present/absent, `localhost` never resolved, names resolving to loopback and mixed answers refused, no other address class admitted (14 URL forms), `allow_private` unchanged, config rules, end-to-end HEALTHZ and DEEP_PROBE through the default fetcher.  
+
+## Explained survivors
+
+  -  **Blind timer from `since` instead of the episode start:** equivalent, an unknown-only episode has the same start either way (mixed episodes already alert through their failure part).  
+  -  **Mapped `::ffff:127.0.0.1` accepted as a loopback literal:** equivalent, the IPv6 form is not inside the IPv4 loopback network, so `is_loopback_literal` is already false; the explicit check documents intent.  
+  -  The review's survivor "flap check fires while a check is already alerted" is resolved by removing the dead guard.  
+
+## Judgment calls to confirm
+
+  -  Episode semantics change: crit,warn,crit,warn alerts at the second cycle (it was silent); an escalation inside a confirmed episode alerts at once.  
+  -  A healthy cycle ends an episode immediately, so ok/crit oscillation relies on the flap detector (unchanged).  
+  -  Reference independence uses the last two domain labels (over-rejects `*.co.uk`-style names; no offline public-suffix list).  
+  -  Reset marker is a new tiny write outside the data dir (CLAUDE.md rule updated).  
+  -  Abandoned timed-out sends can still complete in the background (possible duplicate on retry).  
+
+## Unverifiable here (adds)
+
+  -  `/proc/locks` on a real WSL2 kernel with the real backup library holding its lock (the sandbox's `/proc/locks` and a subprocess `flock` were used).  
+  -  flock behaviour on `/mnt/c` (the sandbox cannot write there); only the error handling is tested, with `ENOLCK` injected.  

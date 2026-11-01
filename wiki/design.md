@@ -181,6 +181,8 @@ Fleet Truth never fetches into, writes to, or takes locks in the owner's working
   -  Dirty-file detection runs `git -C <working clone> --no-optional-locks status --porcelain` (read-only, takes no index lock).  
   -  A repo with no local clone (`repo:` omitted) is mirrored from GitHub only; `UNPUSHED` is then skipped.  
 
+**Probing local apps (added with fix pass 2):** Fleet Truth's own `/healthz` and any app on the same host live on `127.0.0.1`. `allow_private` still refuses loopback (section 9.1); a URL may set the separate, explicit `allow_loopback: true`, valid only when its host is the literal `localhost` or a loopback IP literal. `localhost` is not resolved through DNS, a name that resolves to loopback stays refused, and the flag lifts nothing else (no private ranges, no metadata, no link-local).  
+
 ### 6.4 Cycle
 
 ```

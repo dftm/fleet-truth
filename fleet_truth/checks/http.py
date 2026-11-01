@@ -31,12 +31,13 @@ def is_access_redirect(resp: net.Response) -> bool:
 
 
 def _request(url: str, headers: dict, allow_private: bool, timeout_s: float, fetch: Fetch,
-             sleep: Callable[[float], None]) -> net.Response | net.FetchError:
+             sleep: Callable[[float], None], allow_loopback: bool = False) -> net.Response | net.FetchError:
     """One request, plus one retry after 3 s on connect error, timeout or 5xx."""
     last: net.Response | net.FetchError | None = None
     for attempt in range(2):
         try:
-            last = fetch(url, headers=headers, allow_private=allow_private, timeout_s=timeout_s)
+            extra = {"allow_loopback": True} if allow_loopback else {}
+            last = fetch(url, headers=headers, allow_private=allow_private, timeout_s=timeout_s, **extra)
             if last.status < 500:
                 return last
         except net.FetchError as e:
@@ -74,7 +75,7 @@ def healthz(app: App, fetch: Fetch = net.fetch, sleep: Callable[[float], None] =
     h = app.health
     if h is None:
         return CheckResult("unknown", "NOT_CONFIGURED", "no health block")
-    r = _request(h.url, {"Accept": "application/json"}, h.allow_private, h.timeout_s, fetch, sleep)
+    r = _request(h.url, {"Accept": "application/json"}, h.allow_private, h.timeout_s, fetch, sleep, h.allow_loopback)
     if isinstance(r, net.FetchError):
         return _fetch_error_result(r)
     if is_access_redirect(r):
@@ -123,7 +124,7 @@ def deep_probe(app: App, creds: Credentials, fetch: Fetch = net.fetch,
     if missing:
         return CheckResult("unknown", "NO_CREDENTIALS", "env var not set: " + ", ".join(missing))
     headers = {"Accept": "application/json", **headers}
-    r = _request(v.url, headers, v.allow_private, v.timeout_s, fetch, sleep)
+    r = _request(v.url, headers, v.allow_private, v.timeout_s, fetch, sleep, v.allow_loopback)
     if isinstance(r, net.FetchError):
         return _fetch_error_result(r)
     if r.status in (401, 403) or is_access_redirect(r):
@@ -159,7 +160,8 @@ def tls_expiry(app: App, now: float | None = None, cert_fn: Callable[..., tuple]
     else:
         return CheckResult("unknown", "NOT_CONFIGURED", "no https URL or tls.host to check")
     try:
-        ip, not_after = cert_fn(url, allow_private=allow_private)
+        lo = bool(app.health and app.health.allow_loopback)
+        ip, not_after = cert_fn(url, allow_private=allow_private, **({"allow_loopback": True} if lo else {}))
     except net.FetchError as e:
         if e.kind == "BLOCKED":
             return CheckResult("unknown", "BLOCKED_TARGET", f"refused by the SSRF guard: {e.message}")

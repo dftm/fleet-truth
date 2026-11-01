@@ -9,6 +9,7 @@ file can switch off the SSRF checks or allow loopback (that is a test-only param
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -140,6 +141,7 @@ class HealthCfg:
     expect_json: dict | None = None
     timeout_s: float = 10.0
     allow_private: bool = False
+    allow_loopback: bool = False   # probe a local app: only the literal host localhost or a loopback IP
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,7 @@ class VersionCfg:
     auth: str | None = None           # None | "access"
     timeout_s: float = 10.0
     allow_private: bool = False
+    allow_loopback: bool = False
 
 
 @dataclass(frozen=True)
@@ -306,7 +309,8 @@ def _date(d: dict, key: str, path: str, ctx: _Ctx) -> datetime.date | None:
     return None
 
 
-def _url(v: Any, path: str, ctx: _Ctx, allow_private: bool, public_only: bool = False) -> str | None:
+def _url(v: Any, path: str, ctx: _Ctx, allow_private: bool, public_only: bool = False,
+         allow_loopback: bool = False) -> str | None:
     if not isinstance(v, str) or not v.strip():
         ctx.err(path, "must be a URL string")
         return None
@@ -324,9 +328,18 @@ def _url(v: Any, path: str, ctx: _Ctx, allow_private: bool, public_only: bool = 
     if s.scheme not in ("http", "https"):
         ctx.err(path, "scheme must be https:// (or http:// with allow_private: true)")
         return None
-    if s.scheme == "http" and not allow_private:
-        ctx.err(path, "http:// is allowed only with allow_private: true (private/tailnet targets)")
+    if s.scheme == "http" and not (allow_private or allow_loopback):
+        ctx.err(path, "http:// is allowed only with allow_private: true (private/tailnet targets) or allow_loopback: true")
         return None
+    if allow_loopback and (host or "").lower() != "localhost":
+        try:
+            ok = ipaddress.ip_address(host or "").is_loopback and not getattr(ipaddress.ip_address(host), "ipv4_mapped", None)
+        except ValueError:
+            ok = False
+        if not ok:
+            ctx.err(path, "allow_loopback: true needs the literal host localhost, 127.x.x.x or [::1] "
+                          "(a DNS name that resolves to loopback stays refused)")
+            return None
     if s.username is not None or s.password is not None or "@" in s.netloc:
         ctx.err(path, "URL must not contain user:pass@ credentials")
         return None
@@ -455,27 +468,29 @@ def _app(raw: Any, path: str, defaults: dict, ctx: _Ctx) -> App | None:
     health = None
     if d.get("health") is not None:
         h = _obj(d["health"], f"{path}.health", ctx,
-                 {"url", "expect_status", "expect_json", "timeout_s", "allow_private"}, {"url"})
+                 {"url", "expect_status", "expect_json", "timeout_s", "allow_private", "allow_loopback"}, {"url"})
         ap = _bool(h, "allow_private", f"{path}.health", ctx)
-        url = _url(h.get("url"), f"{path}.health.url", ctx, ap) if "url" in h else None
+        al = _bool(h, "allow_loopback", f"{path}.health", ctx)
+        url = _url(h.get("url"), f"{path}.health.url", ctx, ap, allow_loopback=al) if "url" in h else None
         ej = h.get("expect_json")
         if ej is not None and not isinstance(ej, dict):
             ctx.err(f"{path}.health.expect_json", "must be a mapping of key -> value")
             ej = None
         if url:
             health = HealthCfg(url, int(_num(h, "expect_status", f"{path}.health", ctx, 200, 100, True)), ej,
-                               float(_num(h, "timeout_s", f"{path}.health", ctx, 10.0, 1)), ap)
+                               float(_num(h, "timeout_s", f"{path}.health", ctx, 10.0, 1)), ap, al)
     version = None
     if d.get("version") is not None:
-        v = _obj(d["version"], f"{path}.version", ctx, {"url", "auth", "timeout_s", "allow_private"}, {"url"})
+        v = _obj(d["version"], f"{path}.version", ctx, {"url", "auth", "timeout_s", "allow_private", "allow_loopback"}, {"url"})
         ap = _bool(v, "allow_private", f"{path}.version", ctx)
-        url = _url(v.get("url"), f"{path}.version.url", ctx, ap) if "url" in v else None
+        al = _bool(v, "allow_loopback", f"{path}.version", ctx)
+        url = _url(v.get("url"), f"{path}.version.url", ctx, ap, allow_loopback=al) if "url" in v else None
         auth = v.get("auth")
         if auth not in (None, "access"):
             ctx.err(f"{path}.version.auth", "must be 'access' or omitted")
             auth = None
         if url:
-            version = VersionCfg(url, auth, float(_num(v, "timeout_s", f"{path}.version", ctx, 10.0, 1)), ap)
+            version = VersionCfg(url, auth, float(_num(v, "timeout_s", f"{path}.version", ctx, 10.0, 1)), ap, al)
 
     def section(key, cls, allowed_keys, required=frozenset()):
         if d.get(key) is None and not defaults.get(key):

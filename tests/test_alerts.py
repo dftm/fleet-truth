@@ -984,3 +984,33 @@ def test_budget_config_and_dispatcher_skips_remaining_after_exhaustion():
     out = disp.dispatch([decision(), decision(), decision()])
     assert time.monotonic() - t0 < 2.0
     assert [o.delivered for o in out] == [1, 0, 0]
+
+
+def test_a_skipped_result_is_never_a_delivery_even_if_a_sender_marks_it_ok():
+    class Sloppy:
+        name, min_status = "sloppy", "info"
+
+        def send(self, msg):
+            return alerts.SendResult(True, "", skipped=True)
+
+    out = alerts.Dispatcher([Sloppy()], None, "u").dispatch([decision(kind="blind", level="crit")])
+    assert out[0].delivered == 0 and out[0].skipped == 1
+
+
+def test_delivery_of_the_monitor_offline_alert_alone_ends_suppression(tmp_path):
+    cfg = off_cfg(tmp_path, offline_suppress_cycles=50)     # the cap cannot be what ends it
+    R_fleet_down.ref = False
+    stub = Stub(body=b"{}")
+    first_app_alert = None
+    for i in range(6):
+        o = runtime.run_once(cfg, runner_factory=R_fleet_down, now=1_000_000 + i * 300, fetch=stub)
+        if first_app_alert is None and any(d.decision.app != "_monitor" for d in o.deliveries):
+            first_app_alert = i
+        o.store.close()
+    assert first_app_alert == 2
+    dead = Stub(status=500)
+    cfg2 = off_cfg(tmp_path / "x", offline_suppress_cycles=50)
+    for i in range(6):
+        o = runtime.run_once(cfg2, runner_factory=R_fleet_down, now=1_000_000 + i * 300, fetch=dead)
+        assert all(d.decision.app == "_monitor" for d in o.deliveries), "undelivered monitor alert: suppression continues up to the cap"
+        o.store.close()

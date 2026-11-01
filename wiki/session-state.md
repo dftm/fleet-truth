@@ -7,7 +7,7 @@ A snapshot, not a history -- overwritten whenever the state changes, unlike [log
 ## Right now
 
   -  Cards [1]-[7] are committed on `wt/1-mvp` (worktree `/home/dftms/worktrees/fleet-truth/wt-1-mvp`), one commit per card plus one fix-up commit; `main` still holds only the planning pack and spike.  
-  -  416 tests pass after the review fix pass (also from a fresh clone). Mutation evidence and per-criterion results: [../WIP/streams/wt-1-mvp.md](../WIP/streams/wt-1-mvp.md). Decisions the cards left open: [implementation-notes.md](implementation-notes.md).  
+  -  three review rounds in, the suite is green (see the report for the count) (also from a fresh clone). Mutation evidence and per-criterion results: [../WIP/streams/wt-1-mvp.md](../WIP/streams/wt-1-mvp.md). Decisions the cards left open: [implementation-notes.md](implementation-notes.md).  
   -  Next gate: separate adversarial reviewer per card (cards say "reviewer closed"), then the owner merges the branch.  
 
 ## Blocked on you

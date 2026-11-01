@@ -159,7 +159,7 @@ class Target:
     literal_ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None
 
 
-def parse_url(url: str, allow_private: bool) -> Target:
+def parse_url(url: str, allow_private: bool, allow_loopback: bool = False) -> Target:
     if not isinstance(url, str) or not url or any(ord(c) <= 32 or ord(c) == 127 for c in url):
         raise FetchError("BAD_URL", "URL is empty or contains whitespace/control characters")
     try:
@@ -171,8 +171,8 @@ def parse_url(url: str, allow_private: bool) -> Target:
         raise FetchError("BAD_URL", "port out of range")
     if s.scheme not in ("http", "https"):
         raise FetchError("BAD_URL", "scheme must be https (or http with allow_private)")
-    if s.scheme == "http" and not allow_private:
-        raise FetchError("BAD_URL", "plain http is allowed only with allow_private")
+    if s.scheme == "http" and not (allow_private or allow_loopback):
+        raise FetchError("BAD_URL", "plain http is allowed only with allow_private or allow_loopback")
     if "@" in s.netloc or s.username is not None or s.password is not None:
         raise FetchError("BAD_URL", "userinfo in URL is not allowed")
     host = (s.hostname or "").lower()
@@ -217,9 +217,33 @@ def _resolve_bounded(res: Callable, host: str, port: int, timeout_s: float | Non
     return box["r"]
 
 
+def is_loopback_literal(target: Target) -> bool:
+    """True only for the literal host `localhost` or an IP literal inside 127.0.0.0/8 or ::1 (no DNS involved)."""
+    if target.host == "localhost":
+        return True
+    ip = target.literal_ip
+    if ip is None:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return False  # a mapped form is not a loopback literal for this flag
+    return _in(ip, _LOOPBACK_NETS)
+
+
 def validate_addresses(target: Target, allow_private: bool, resolver: Callable | None,
-                       hooks: TestHooks | None, timeout_s: float | None = None) -> list[str]:
-    """Resolve target.host once and return the validated IPs. Raises BLOCKED if any answer is bad."""
+                       hooks: TestHooks | None, timeout_s: float | None = None, allow_loopback: bool = False) -> list[str]:
+    """Resolve target.host once and return the validated IPs. Raises BLOCKED if any answer is bad.
+
+    `allow_loopback` (per-URL, owner-set) admits ONLY loopback, and only when the URL's host is the literal
+    `localhost` or a loopback IP literal: `localhost` is never looked up (it means 127.0.0.1 and ::1), and a
+    DNS name that resolves to loopback stays refused. It admits no other address class and never metadata."""
+    if allow_loopback and is_loopback_literal(target):
+        ips = [target.literal_ip] if target.literal_ip is not None else [ipaddress.ip_address("127.0.0.1"),
+                                                                       ipaddress.ip_address("::1")]
+        for ip in ips:  # same policy object: loopback is the only thing that flag lifts
+            reason = blocked_reason(ip, allow_private, True)
+            if reason:
+                raise FetchError("BLOCKED", f"{target.host} -> {ip}: {reason}")
+        return [str(ip) for ip in ips]
     allow_lo = bool(hooks and hooks.allow_loopback)
     if target.literal_ip is not None:
         ips = [target.literal_ip]
@@ -354,14 +378,14 @@ def _not_after(sock) -> float | None:
 
 def fetch(url: str, headers: dict | None = None, allow_private: bool = False, method: str = "GET",
           body: bytes | None = None, timeout_s: float = 10.0, max_bytes: int = MAX_BYTES_DEFAULT,
-          resolver: Callable | None = None, *, _hooks: TestHooks | None = None) -> Response:
+          resolver: Callable | None = None, allow_loopback: bool = False, *, _hooks: TestHooks | None = None) -> Response:
     """One request through the pinned path. Raises FetchError; never follows redirects."""
     if method not in ("GET", "HEAD", "POST"):
         raise FetchError("BAD_URL", "method not allowed")
-    target = parse_url(url, allow_private)
+    target = parse_url(url, allow_private, allow_loopback)
     watch = _Watch(timeout_s)  # the limit covers name resolution too
     try:
-        ips = validate_addresses(target, allow_private, resolver, _hooks, timeout_s)
+        ips = validate_addresses(target, allow_private, resolver, _hooks, timeout_s, allow_loopback)
     except BaseException:
         watch.stop()
         raise
@@ -429,15 +453,15 @@ def fetch(url: str, headers: dict | None = None, allow_private: bool = False, me
 
 
 def peer_cert(url: str, allow_private: bool = False, timeout_s: float = 10.0,
-              resolver: Callable | None = None, *, _hooks: TestHooks | None = None) -> tuple[str, float | None]:
+              resolver: Callable | None = None, allow_loopback: bool = False, *, _hooks: TestHooks | None = None) -> tuple[str, float | None]:
     """TLS handshake only, through the same pinned path. Returns (peer_ip, notAfter epoch)."""
-    target = parse_url(url, allow_private)
+    target = parse_url(url, allow_private, allow_loopback)
     if target.scheme != "https":
         raise FetchError("BAD_URL", "TLS check needs an https URL")
     watch = _Watch(timeout_s)
     sock = None
     try:
-        ips = validate_addresses(target, allow_private, resolver, _hooks, timeout_s)
+        ips = validate_addresses(target, allow_private, resolver, _hooks, timeout_s, allow_loopback)
     except BaseException:
         watch.stop()
         raise
