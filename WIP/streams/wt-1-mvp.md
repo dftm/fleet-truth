@@ -109,3 +109,34 @@ Twelve smaller decisions (config keys for email/webhook/ntfy, exit code 4, corre
   [3]  Land `wt/1-mvp` on `main` yourself (the stream fence forbids the builder from doing it).  
   [4]  Before card [8]: create the healthchecks.io check (period 5 min, grace 15 min), the fine-grained GitHub token (Contents read-only), choose the alert channel, put the values in `~/.config/fleet-truth/env` (0600), write `fleet.yaml` from `fleet.example.yaml`, then run `fleet-truth check-config fleet.yaml` and `fleet-truth test-alert` yourself.  
   [5]  Install tooling for the venv step: `python3 -m venv .venv && .venv/bin/pip install -e .[dev]` on a machine with network, to confirm the acceptance line this environment could not.  
+
+
+# Fix pass (after REVIEW-wt-1-mvp.md, verdict "fix then ship")
+
+Totals: **416 tests pass** (baseline 236, +180) in about 23 s, also from a fresh clone. Mutation check for the new code and tests: [wt-1-mvp-mutate-fixpass.py](wt-1-mvp-mutate-fixpass.py), 50 mutants, **50 killed** (first run left one survivor, a depth-cap test that raised for the wrong reason; fixed and re-killed). Re-run of the first-pass script: the same documented survivors; patterns that moved are covered by the new script.
+
+## Per item
+
+  [1]  **Email/senders (HIGH).** Root causes: no timeout (TypeError in `settimeout`) and no TLS server name (the second bug, found by the new test). Also added: greeting-code check, precise failure text (class plus SMTP code). `tests/smtpstub.py` is a real SMTP server on 127.0.0.1; `test_real_email_path_*` cover success (message only after STARTTLS, AUTH after it) and seven failure modes; `test_real_email_factory_refuses_unvalidated_targets`. Real-path tests for the other senders: `test_real_telegram_path`, `test_real_ntfy_path`, `test_real_webhook_json_and_healthchecks_paths` (through `net.fetch` and a loopback TLS server, success and HTTP-error cases).  
+  [2]  **RUNNING bound (HIGH).** `test_hung_backup_cannot_hide_a_30_day_stale_required_backup` is the reproduced scenario; plus `test_running_grace_defaults_and_config`, `test_grace_without_store_falls_back_to_lock_mtime`, `test_ok_status_is_never_replaced_by_lock_stuck`.  
+  [3]  **Timestamps.** `test_backup_age_rejects_impossible_timestamps` (12 table rows), `test_small_clock_skew_is_tolerated_and_missing_epoch_stays_stale`, `test_unreadable_is_not_masked_by_a_running_lock`. Library follow-up recorded in implementation-notes (not edited).  
+  [4]  **Correlation.** Three-case tests, reference only consulted when needed, real `Runner.reference_ok`, config validation (`tests/test_cycle.py`).  
+  [5]  **Blind/undelivered.** `test_blind_alert_is_crit_eligible_by_default_and_reaches_a_crit_only_channel`, `test_blind_alert_nobody_can_receive_withholds_ok_ping_and_sends_fail`, `test_decision_with_no_channels_configured_is_undelivered_and_fails_the_ping`, `test_severity_filtered_warn_on_crit_only_channel_is_not_a_failure`, state and config tests.  
+  [6]  **Smaller.** (a)(b)(c) `tests/test_resilience.py` (5 tests); (d) four flap tests in `tests/test_cycle.py`; (e) four YAML tests in `tests/test_config.py` (alias bomb rejected in under 1 s); (f) metadata addresses and hostnames, site-local and special ranges, ports (URL, config, tls.host, smtp_port), DNS inside the time limit in `tests/test_net.py`; (g) `stdlib_says_everything_is_fine` fixture tests, the declared-size layer alone, both git no-lock guards, both scrub layers.  
+
+## Judgment calls to confirm
+
+  -  Filtered-by-`min_status` warns are not "undelivered" (see implementation-notes [5]).  
+  -  `allow_private` now admits IPv6 ULA (you wrote "loopback/RFC1918/CGNAT/ULA"); loopback stays refused (card [3] acceptance and the existing tests require that). Per-host explicitness is the existing per-URL `allow_private` flag.  
+  -  The `/fail` ping on a state reset is followed, in the same run, by the normal OK ping if the cycle completes and a channel heard the reset alert.  
+  -  Flap counts every status change except ok<->info (so crit<->unknown and crit<->warn flap too).  
+
+## Deferred, updated
+
+  -  Item [5] of the first Deferred list (IPv6 ULA) is resolved. Remaining: `heartbeat.url`, healthchecks warn/blind mapping, `MONITOR_SELF`, TLS alert latency, `probe_via_proxy`, silences (card [12]).  
+  -  New: `backup_lib._check_status` has the timestamp gap from [3] (library not edited).  
+
+## Unverifiable here (unchanged, plus)
+
+  -  Real SMTP providers (STARTTLS negotiation, AUTH mechanisms beyond what smtplib picks) were exercised only against the loopback stub.  
+  -  Python 3.12 is still not available to run; the version-dependent layers are now covered by stdlib-neutralising tests instead.  

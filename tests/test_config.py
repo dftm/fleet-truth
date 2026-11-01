@@ -226,8 +226,13 @@ def test_size_depth_and_node_caps():
     with pytest.raises(config.ConfigError) as e:
         config.parse_text("# " + "x" * 70000 + "\napps: [{name: a}]\n")
     assert "KB" in e.value.errors[0]
-    with pytest.raises(config.ConfigError):
-        config.parse_text("a: " + "[" * 30 + "]" * 30 + "\napps: [{name: a}]\n")
+    deep = "{a: " * 6 + "1" + "}" * 6
+    ok = config.parse_text(f"apps: [{{name: a, health: {{url: 'https://a.example.com/', expect_json: {deep}}}}}]\n")
+    assert ok.apps[0].health.expect_json  # a valid document at that nesting is fine without the cap ...
+    deeper = "{a: " * 25 + "1" + "}" * 25
+    with pytest.raises(config.ConfigError) as e:  # ... and the depth cap is what stops a deeper one
+        config.parse_text(f"apps: [{{name: a, health: {{url: 'https://a.example.com/', expect_json: {deeper}}}}}]\n")
+    assert "nesting deeper" in e.value.errors[0]
     with pytest.raises(config.ConfigError):
         config.parse_text("apps: [{name: a}]\nz: [" + ",".join(["1"] * 6000) + "]\n")
     with pytest.raises(config.ConfigError):  # recursion in the parser itself
