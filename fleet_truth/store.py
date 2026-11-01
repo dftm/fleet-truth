@@ -50,6 +50,10 @@ class StoreError(Exception):
     pass
 
 
+class SchemaTooNew(StoreError):
+    """The database was written by a newer build (a rollback). Not corruption: never move it aside."""
+
+
 @dataclass(frozen=True)
 class StateRow:
     app: str
@@ -89,6 +93,7 @@ class Store:
                 Path(self.path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
             self.db.row_factory = sqlite3.Row
+            self._check_not_newer()   # before any pragma that would rewrite the header of a newer build's file
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA foreign_keys=ON")
             self._migrate()
@@ -96,10 +101,17 @@ class Store:
             raise StoreError(f"database unusable ({type(e).__name__}); it is a rebuildable cache: "
                              "stop Fleet Truth and delete the file") from None
 
+    def _check_not_newer(self) -> None:
+        v = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if v > len(MIGRATIONS):
+            raise SchemaTooNew(f"database schema {v} is newer than this build ({len(MIGRATIONS)}): run the newer build, "
+                               "or move the file aside yourself to start fresh")
+
     def _migrate(self) -> None:
         v = self.db.execute("PRAGMA user_version").fetchone()[0]
         if v > len(MIGRATIONS):
-            raise StoreError(f"database schema {v} is newer than this build ({len(MIGRATIONS)})")
+            raise SchemaTooNew(f"database schema {v} is newer than this build ({len(MIGRATIONS)}): run the newer build, "
+                             "or move the file aside yourself to start fresh")
         for n in range(v, len(MIGRATIONS)):
             self.db.executescript("BEGIN;" + MIGRATIONS[n] + f"PRAGMA user_version={n + 1};COMMIT;")
 

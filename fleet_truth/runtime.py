@@ -17,7 +17,7 @@ from . import config as cfgmod
 from . import cycle as cyc
 from .checks.runner import Runner
 from .state import AlertDecision
-from .store import Store, StoreError
+from .store import SchemaTooNew, Store, StoreError
 
 log = logging.getLogger("fleet_truth")
 DB_NAME = "fleet-truth.db"
@@ -58,17 +58,30 @@ def run_lock(cfg: cfgmod.Config):
 
 def _move_aside(path: Path) -> Path:
     """Rename a bad database (and its WAL/SHM files) out of the way. Never deletes."""
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest = path.with_name(f"{path.name}.corrupt-{stamp}")
-    n = 0
-    while dest.exists():
-        n += 1
-        dest = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
+    ns = time.time_ns()
+    # sortable and monotonic even when copies were deleted in between (a reused counter would reorder them)
+    dest = path.with_name(f"{path.name}.corrupt-{time.strftime('%Y%m%d-%H%M%S', time.localtime(ns // 10**9))}-{ns % 10**9:09d}")
     for suffix in ("", "-wal", "-shm"):
         src = path.with_name(path.name + suffix)
         if src.exists():
             os.rename(src, dest.with_name(dest.name + suffix))
     return dest
+
+
+MAX_CORRUPT_COPIES = 3
+
+
+def _cap_corrupt_copies(path: Path) -> None:
+    """Keep the FIRST corrupt copy ever made plus the newest ones, at most MAX_CORRUPT_COPIES in total."""
+    copies = sorted(p for p in path.parent.glob(path.name + ".corrupt-*") if not p.name.endswith(("-wal", "-shm")))
+    if len(copies) <= MAX_CORRUPT_COPIES:
+        return
+    keep = {copies[0], *copies[-(MAX_CORRUPT_COPIES - 1):]}
+    for c in copies:
+        if c not in keep:
+            for suffix in ("", "-wal", "-shm"):
+                with contextlib.suppress(OSError):
+                    os.unlink(c.with_name(c.name + suffix))
 
 
 def marker_path(cfg: cfgmod.Config, config_path: str | Path | None = None) -> Path:
@@ -95,8 +108,11 @@ def open_store_checked(cfg: cfgmod.Config, config_path: str | Path | None = None
     existed = path.exists()
     try:
         store = Store(path)
+    except SchemaTooNew:
+        raise  # a rollback, not corruption: keep the file, say so, let the caller ping /fail
     except StoreError:
         moved = _move_aside(path)
+        _cap_corrupt_copies(path)
         store = Store(path)
         note = f"database was unusable and was moved to {moved.name}; history, alert de-duplication and channel health are reset"
     else:

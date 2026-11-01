@@ -36,6 +36,9 @@ def _once(path: str) -> int:
     except runtime.RunLocked:
         print("another fleet-truth run is in progress (run lock held); exiting without doing anything", file=sys.stderr)
         return 5
+    except runtime.SchemaTooNew as e:
+        print(f"database error: {e}", file=sys.stderr)
+        return 4
     except runtime.LockError as e:
         print(f"lock error: {e}", file=sys.stderr)
         return 4

@@ -171,3 +171,41 @@ def test_marker_goes_next_to_the_config_file(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "Runner", R_ok)
     assert cli.main(["once", "-c", str(conf)]) == 0
     assert list(conf.parent.glob(".fleet-truth-*.initialized"))
+
+
+# ------------------------------------------------------------------ review 2 R8: rollback is not corruption
+def test_database_from_a_newer_build_is_refused_not_renamed(tmp_path, capsys):
+    import sqlite3
+    from fleet_truth.store import MIGRATIONS
+    cfg = dm_cfg(tmp_path, NTFY)
+    db = runtime.db_path(cfg)
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE keepme(x)")
+    c.execute(f"PRAGMA user_version={len(MIGRATIONS) + 3}")
+    c.commit()
+    c.close()
+    before = db.read_bytes()
+    for _ in range(3):
+        stub = Stub()
+        with pytest.raises(runtime.SchemaTooNew):
+            runtime.run_once(cfg, runner_factory=R_ok, fetch=stub)
+        assert [c["url"] for c in stub.calls] == ["https://hc.example.com/ping/SEKRIT-dm/fail"]
+    assert db.exists() and db.read_bytes() == before
+    assert not [p for p in tmp_path.iterdir() if "corrupt" in p.name]
+    f = tmp_path / "fleet.yaml"
+    f.write_text(f"data_dir: {tmp_path}\napps: [{{name: a, health: {{url: 'https://a.example.com/'}}}}]\n")
+    assert cli.main(["once", "-c", str(f)]) == 4
+    assert "newer than this build" in capsys.readouterr().err
+
+
+def test_corrupt_copies_are_capped_and_the_first_is_never_deleted(tmp_path):
+    cfg = dm_cfg(tmp_path, NTFY)
+    db = runtime.db_path(cfg)
+    for i in range(7):
+        db.write_bytes(f"corrupt generation {i}".encode() * 20)
+        runtime.run_once(cfg, runner_factory=R_ok, now=1000 + i, fetch=Stub(body=b"{}")).store.close()
+    copies = sorted(p for p in tmp_path.iterdir() if ".corrupt-" in p.name and not p.name.endswith(("-wal", "-shm")))
+    assert len(copies) == runtime.MAX_CORRUPT_COPIES == 3
+    contents = [p.read_bytes() for p in copies]
+    assert contents[0].startswith(b"corrupt generation 0"), "the first corrupt copy is kept for good"
+    assert contents[-1].startswith(b"corrupt generation 6") and contents[-2].startswith(b"corrupt generation 5")
