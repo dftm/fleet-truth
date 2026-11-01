@@ -176,7 +176,8 @@ def _run_locked(cfg, store, reset_note, runner_factory, now, deadline_s, fetch, 
     kw = {"fetch": fetch} if fetch else {}
     runner = (runner_factory or Runner)(cfg, meta_get=store.meta_get, meta_set=store.meta_set, **kw)
     snd = alerts.build_senders(cfg, fetch_fn, get_secret) if senders is None else senders
-    disp = alerts.Dispatcher(snd, store, alerts.page_url(cfg), budget_s=cfg.alert_budget_seconds)
+    disp = alerts.Dispatcher(snd, store, alerts.page_url(cfg), budget_s=cfg.alert_budget_seconds,
+                             channel_budget_s=cfg.channel_budget_seconds, backoff_cycles=cfg.channel_backoff_cycles)
     if reset_note:
         # the corrupt/missing DB is itself a failure: tell the dead-man now, and below tell the humans
         alerts.dead_man_ping(cfg, cycle_ok=False, error_class="StateReset", channels_healthy=False,

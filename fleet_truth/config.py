@@ -192,7 +192,9 @@ class Config:
     intermittent: IntermittentCfg = field(default_factory=IntermittentCfg)
     recover_after: int = 2                 # consecutive healthy cycles that end an episode and send the [OK]
     reopen_cooldown_cycles: int = 6        # a failure this soon after a recovery continues the same episode
-    alert_budget_seconds: float = 60.0     # total time one cycle may spend sending alerts
+    alert_budget_seconds: float = 60.0     # overall cap on one cycle's alert sending
+    channel_budget_seconds: float = 20.0   # each channel's own budget (channels run in parallel)
+    channel_backoff_cycles: int = 3        # a channel that did not answer sits out this many cycles, doubling to 12
     offline_suppress_cycles: int = 2       # max cycles 'monitor offline' may suppress app alerts
     blind_level: str = "crit"           # level of 'monitor cannot judge' alerts, compared with channel min_status
     reference_urls: tuple[str, ...] = ()  # independent public URLs used to tell 'monitor offline' from 'fleet down'
@@ -565,7 +567,7 @@ def parse(data: Any) -> Config:
         raise ConfigError(["<root>: the file must contain a mapping"])
     _scan_literal_secrets(data, "", ctx)
     top = _obj(data, "", ctx, {"interval_seconds", "confirm", "data_dir", "web", "git", "credentials", "alerts",
-                               "dead_man", "defaults", "apps", "reference_urls", "blind_level", "flap", "offline_suppress_cycles", "alert_budget_seconds", "intermittent", "recover_after",
+                               "dead_man", "defaults", "apps", "reference_urls", "blind_level", "flap", "offline_suppress_cycles", "alert_budget_seconds", "channel_budget_seconds", "channel_backoff_cycles", "intermittent", "recover_after",
                                "reopen_cooldown_cycles"})
     interval = int(_num(top, "interval_seconds", "interval_seconds", ctx, 300, 10, True)) if "interval_seconds" in top else 300
     confirm = int(_num(top, "confirm", "confirm", ctx, 2, 1, True)) if "confirm" in top else 2
@@ -612,6 +614,8 @@ def parse(data: Any) -> Config:
         blind_level = "crit"
     off_cycles = int(_num(top, "offline_suppress_cycles", "offline_suppress_cycles", ctx, 2, 0, True)) if "offline_suppress_cycles" in top else 2
     budget = float(_num(top, "alert_budget_seconds", "alert_budget_seconds", ctx, 60.0, 1)) if "alert_budget_seconds" in top else 60.0
+    chan_budget = float(_num(top, "channel_budget_seconds", "channel_budget_seconds", ctx, 20.0, 1)) if "channel_budget_seconds" in top else 20.0
+    backoff_cycles = int(_num(top, "channel_backoff_cycles", "channel_backoff_cycles", ctx, 3, 1, True)) if "channel_backoff_cycles" in top else 3
     refs: list[str] = []
     raw_refs = top.get("reference_urls")
     if raw_refs is not None and not isinstance(raw_refs, list):
@@ -663,7 +667,7 @@ def parse(data: Any) -> Config:
 
     if ctx.errors:
         raise ConfigError(ctx.errors)
-    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), flap, intermittent, recover_after, reopen_cycles, budget, off_cycles, blind_level, tuple(refs))
+    cfg = Config(interval, confirm, data_dir, web, git, creds, tuple(alerts), dead_man, tuple(apps), flap, intermittent, recover_after, reopen_cycles, budget, chan_budget, backoff_cycles, off_cycles, blind_level, tuple(refs))
     secrets.register(*cfg.env_names())
     return cfg
 

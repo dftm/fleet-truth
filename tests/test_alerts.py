@@ -212,7 +212,7 @@ def test_min_status_filter_and_recording(tmp_path):
     disp = alerts.Dispatcher(alerts.build_senders(cfg, stub), store, "u")
     out = disp.dispatch([decision(level="warn"), decision(level="crit")])
     assert [(d.eligible, d.delivered) for d in out] == [(1, 1), (2, 2)]
-    assert [c["url"].split("/")[2] for c in stub.calls] == ["ntfy.sh", "api.telegram.org", "ntfy.sh"]
+    assert sorted(c["url"].split("/")[2] for c in stub.calls) == ["api.telegram.org", "ntfy.sh", "ntfy.sh"]
     assert store.db.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 3
     assert all(c["allow_private"] is False for c in stub.calls)
 
@@ -959,7 +959,9 @@ def test_slow_smtp_cannot_push_a_run_past_its_alert_budget(tmp_path):
         assert took < 4.0, took
         assert len(o.deliveries) == 2 and all(d.undelivered for d in o.deliveries)
         rows = [r["error"] for r in o.store.db.execute("SELECT error FROM alerts ORDER BY id")]
-        assert "exceeded the alert time budget" in rows[0] and "budget exhausted" in rows[1]
+        assert rows == ["no answer within the channel budget (outcome unknown)"]   # the second message was never attempted
+        assert o.deliveries[0].unknown == 1 and o.deliveries[1].unknown == 0
+        assert o.store.meta_get("bo:email") == '{"level": 3, "skips": 3}'           # the channel sits out 3 cycles
         for app in ("a", "b"):   # both rolled back: retried next cycle
             assert o.store.get_state(app, "HEALTHZ").alerted_status is None
         o.store.close()

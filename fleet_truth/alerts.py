@@ -55,7 +55,8 @@ class AlertMessage:
 class SendResult:
     ok: bool
     error: str = ""
-    skipped: bool = False   # deliberately sent nothing; never counts as delivered
+    skipped: bool = False   # deliberately sent nothing; never counts as delivered, never recorded as a failure
+    unknown: bool = False   # no answer within the channel budget: the message may or may not have gone out
 
 
 class Sender(Protocol):
@@ -184,6 +185,35 @@ class NtfySender(_Base):
 
 
 class WebhookSender(_Base):
+    state = None   # bound per dispatch (get/set of small strings); None outside a dispatch
+
+    def bind(self, state) -> None:
+        self.state = state
+
+    def _mark(self, key: str, value: str) -> None:
+        if self.state is not None:
+            self.state.set(f"hc:{self.name}:{key}", value)
+
+    def reconcile(self, cycle_clear: bool, clear_apps: set | None) -> None:
+        """healthchecks mode: a check last sent `/fail` goes back UP on the first fully clean cycle, even when
+        the recovery message itself was withheld because something else was still down at that moment."""
+        if self.cfg.mode != "healthchecks" or self.state is None:
+            return
+        targets = []
+        if self.cfg.url_env and cycle_clear:
+            targets.append(("base", self.get(self.cfg.url_env)))
+        for app, env in self.cfg.app_url_envs:
+            if clear_apps is None or app in clear_apps:
+                targets.append((app, self.get(env)))
+        for key, url in targets:
+            if url and self.state.get(f"hc:{self.name}:{key}") == "down":
+                try:
+                    r = self._post(url.rstrip("/"), {"Content-Type": "text/plain; charset=utf-8"}, b"all clear")
+                except Exception:  # noqa: BLE001 - retried next cycle
+                    continue
+                if 200 <= r.status < 300:
+                    self._mark(key, "up")
+
     def _url_for(self, msg: AlertMessage) -> tuple[str | None, str | None, bool]:
         """(url, missing-env note, per_app)."""
         per_app = dict(self.cfg.app_url_envs).get(msg.app)
@@ -217,6 +247,9 @@ class WebhookSender(_Base):
         except Exception as e:  # noqa: BLE001
             return _fail(e)
         ok = 200 <= r.status < 300
+        if ok and self.cfg.mode == "healthchecks":
+            key = msg.app if per_app else "base"
+            self._mark(key, "down" if target.endswith("/fail") else "up" if target == url else "")
         return SendResult(ok, "" if ok else f"HTTP {r.status} from webhook")
 
 
@@ -342,6 +375,8 @@ class Delivery:
     delivered: int
     configured: int = 0
     skipped: int = 0   # eligible channels that deliberately sent nothing (never counted as delivered)
+    unknown: int = 0   # eligible channels that did not answer within their budget (outcome unknown, not delivered)
+    backoff: int = 0   # eligible channels sitting out their backoff (not attempted)
 
     @property
     def undelivered(self) -> bool:
@@ -354,15 +389,71 @@ class Delivery:
         return self.eligible > 0 or self.configured == 0 or self.decision.kind == "blind"
 
 
+class _Ctx:
+    """Shared by one dispatch's channel workers. Once `closed`, late workers can neither store results nor state."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.closed = False
+        self.results: dict = {}
+        self.inflight: dict = {}
+
+
+class _State:
+    """Small key/value state for senders (healthchecks up/down); writes are dropped after the dispatch closed."""
+
+    def __init__(self, store: Store | None, ctx: _Ctx):
+        self.store, self.ctx = store, ctx
+
+    def get(self, key: str) -> str | None:
+        try:
+            return self.store.meta_get(key) if self.store else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def set(self, key: str, value: str) -> None:
+        with self.ctx.lock:
+            if self.ctx.closed or self.store is None:
+                return
+            try:
+                self.store.meta_set(key, value)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 class Dispatcher:
+    """Sends decisions to the channels. Every channel works in its own daemon thread, so a slow channel never
+    delays another; each has `channel_budget_s`, the whole dispatch is capped at `budget_s`. Results that arrive
+    after the dispatch closed are DISCARDED (never recorded, never applied). A channel that did not answer is
+    `unknown outcome`: not delivered, put into backoff (3 cycles, doubling to 12) instead of being retried every
+    cycle, and cleared by its next successful delivery."""
+
     def __init__(self, senders: list, store: Store | None, url: str, now_fn: Callable[[], float] = time.time,
-                 budget_s: float = 60.0):
+                 budget_s: float = 60.0, channel_budget_s: float = 20.0, backoff_cycles: int = 3, backoff_max: int = 12):
         self.senders, self.store, self.url, self.now_fn = senders, store, url, now_fn
-        self.budget_s = budget_s
+        self.budget_s, self.channel_budget_s = budget_s, channel_budget_s
+        self.backoff_cycles, self.backoff_max = backoff_cycles, backoff_max
         self._deadline = time.monotonic() + budget_s
 
+    # ---- backoff (kept in meta so it survives between runs)
+    def _bo_get(self, name: str) -> dict:
+        try:
+            d = json.loads(self.store.meta_get(f"bo:{name}") or "{}") if self.store else {}
+        except ValueError:
+            d = {}
+        return {"level": int(d.get("level", 0)), "skips": int(d.get("skips", 0))}
+
+    def _bo_set(self, name: str, level: int, skips: int) -> None:
+        if self.store:
+            self.store.meta_set(f"bo:{name}", json.dumps({"level": level, "skips": skips}))
+
+    def _bo_trip(self, name: str) -> None:
+        prev = self._bo_get(name)["level"]
+        level = self.backoff_cycles if not prev else min(prev * 2, self.backoff_max)
+        self._bo_set(name, level, level)
+
+    # ---- single bounded send (test-alert)
     def _call(self, s, msg: AlertMessage) -> SendResult:
-        """s.send() bounded by what is left of the cycle's alert budget (a slow-drip server cannot stretch it)."""
         left = self._deadline - time.monotonic()
         if left <= 0:
             return SendResult(False, "alert time budget exhausted; retried next cycle")
@@ -378,34 +469,120 @@ class Dispatcher:
         t.start()
         t.join(left)
         if t.is_alive():
-            return SendResult(False, "send exceeded the alert time budget; retried next cycle")
+            return SendResult(False, "send exceeded the alert time budget", unknown=True)
         return box["r"]
 
-    def _send(self, s, msg: AlertMessage) -> SendResult:
-        res = self._call(s, msg)  # a broken or slow sender must not stop the others nor the run
+    def _record(self, msg: AlertMessage, channel: str, res: SendResult) -> SendResult:
         err = clean(res.error)
-        if not res.ok and not res.skipped:
-            log.warning("alert channel %s failed: %s", s.name, err)
+        if res.skipped:
+            return SendResult(res.ok, err, True)   # a deliberate no-op is neither a failure nor a delivery: not recorded
+        if not res.ok:
+            log.warning("alert channel %s failed: %s", channel, err)
         if self.store is not None:
-            self.store.record_alert(msg.app, msg.check, msg.status, s.name, self.now_fn(), res.ok, err or None)
-        return SendResult(res.ok, err, res.skipped)
+            self.store.record_alert(msg.app, msg.check, msg.status, channel, self.now_fn(), res.ok, err or None)
+        return SendResult(res.ok, err, False, res.unknown)
 
+    def _send(self, s, msg: AlertMessage) -> SendResult:
+        self._deadline = min(self._deadline, time.monotonic() + self.channel_budget_s)
+        return self._record(msg, s.name, self._call(s, msg))
+
+    # ---- the per-cycle dispatch
     def dispatch(self, decisions: list[AlertDecision], cycle_clear: bool = True,
                  clear_apps: set | None = None) -> list[Delivery]:
+        start = time.monotonic()
+        deadline = start + min(self.channel_budget_s, self.budget_s)
+        msgs = [format_message(d, self.url, cycle_clear, clear_apps is None or d.app in clear_apps) for d in decisions]
+        elig = {s.name: [i for i, d in enumerate(decisions) if LEVEL_RANK[d.level] >= LEVEL_RANK[s.min_status]]
+                for s in self.senders}
+        backed_off = set()
+        for s in self.senders:
+            bo = self._bo_get(s.name)
+            if bo["skips"] > 0:
+                backed_off.add(s.name)
+                self._bo_set(s.name, bo["level"], bo["skips"] - 1)   # one cycle of sitting out
+        ctx = _Ctx()
+        state = _State(self.store, ctx)
+        threads = {}
+
+        def work(s) -> None:
+            for i in elig[s.name]:
+                with ctx.lock:
+                    if ctx.closed:
+                        return
+                    ctx.inflight[s.name] = i
+                try:
+                    res = s.send(msgs[i])
+                except Exception as e:  # noqa: BLE001 - a broken sender must not stop the others
+                    res = SendResult(False, type(e).__name__)
+                with ctx.lock:
+                    if ctx.closed:
+                        return          # late: discarded
+                    ctx.results[(s.name, i)] = res
+                    ctx.inflight.pop(s.name, None)
+            if hasattr(s, "reconcile"):
+                try:
+                    s.reconcile(cycle_clear, clear_apps)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        for s in self.senders:
+            if s.name in backed_off:
+                continue
+            if hasattr(s, "bind"):
+                s.bind(state)
+            t = threading.Thread(target=work, args=(s,), daemon=True, name=f"ft-chan-{s.name}")
+            threads[s.name] = t
+            t.start()
+        for name, t in threads.items():
+            t.join(max(0.0, deadline - time.monotonic()))
+        with ctx.lock:
+            ctx.closed = True
+            results = dict(ctx.results)
+            inflight = dict(ctx.inflight)
+        hung = {n for n, t in threads.items() if t.is_alive()}
+        for s in self.senders:
+            if hasattr(s, "bind"):
+                s.bind(None)
         out = []
-        self._deadline = time.monotonic() + self.budget_s
-        for d in decisions:
-            msg = format_message(d, self.url, cycle_clear, clear_apps is None or d.app in clear_apps)
-            eligible = [s for s in self.senders if LEVEL_RANK[d.level] >= LEVEL_RANK[s.min_status]]
-            results = [self._send(s, msg) for s in eligible]
-            ok = sum(1 for r in results if r.ok and not r.skipped)
-            out.append(Delivery(d, len(eligible), ok, len(self.senders), sum(1 for r in results if r.skipped)))
+        ok_channels, bad_unknown = set(), set()
+        for i, d in enumerate(decisions):
+            delivered = skipped = unknown = backoff = eligible = 0
+            for s in self.senders:
+                if i not in elig[s.name]:
+                    continue
+                eligible += 1
+                if s.name in backed_off:
+                    backoff += 1
+                    continue
+                res = results.get((s.name, i))
+                if res is None:
+                    if s.name in hung and inflight.get(s.name) == i:
+                        unknown += 1
+                        self._record(msgs[i], s.name, SendResult(
+                            False, "no answer within the channel budget (outcome unknown)", unknown=True))
+                        bad_unknown.add(s.name)
+                    continue   # not attempted: the channel stalled on an earlier message
+                rec = self._record(msgs[i], s.name, res)
+                if rec.skipped:
+                    skipped += 1
+                elif rec.ok:
+                    delivered += 1
+                    ok_channels.add(s.name)
+            out.append(Delivery(d, eligible, delivered, len(self.senders), skipped, unknown, backoff))
+        for name in bad_unknown | (hung & set(threads)):
+            self._bo_trip(name)
+        for name in ok_channels - hung:
+            if self._bo_get(name)["level"]:
+                self._bo_set(name, 0, 0)       # a real delivery clears the backoff
         return out
 
     def test_all(self, version: str) -> dict[str, SendResult]:
         msg = test_message(self.url, version)
-        self._deadline = time.monotonic() + self.budget_s
-        return {s.name: self._send(s, msg) for s in self.senders}  # ignores min_status: tests every channel
+        out = {}
+        for s in self.senders:
+            self._deadline = time.monotonic() + self.channel_budget_s
+            out[s.name] = self._record(msg, s.name, self._call(s, msg))   # ignores min_status: tests every channel
+        return out
 
     def channels_healthy(self) -> bool:
         """True when at least one channel exists whose latest send did not fail (no send yet counts as healthy)."""
