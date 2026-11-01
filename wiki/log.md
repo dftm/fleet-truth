@@ -1,0 +1,3 @@
+# Log (append-only, newest last)
+
+  -  **2026-11-01** Repo created; planning pack written (design, prior art, MVP plan, business, open questions, KANBAN [1]-[14]). Drift spike [../spike/check_drift.py](../spike/check_drift.py) with 7 tests; run read-only against the real clones it reported invoicing `LIVE_NOT_ON_ORIGIN` for a fixture claiming local HEAD is live (local `main` is 2 ahead of origin) and health-web `NO_COMMIT_VERSION_MATCH`. Found while planning: no app reports a live commit today (no workflow passes `GIT_SHA`; `/api/version` is closed to service tokens or missing), which is why card [9] exists.  

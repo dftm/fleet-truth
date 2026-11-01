@@ -1,0 +1,7 @@
+fleet.yaml
+*.env
+.env*
+data/
+__pycache__/
+.venv/
+*.pyc
