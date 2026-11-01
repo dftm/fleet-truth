@@ -286,3 +286,15 @@ def test_infinity_from_yaml_text_is_a_clean_error_and_sane_values_pass():
     c = config.parse({"apps": [{"name": "a"}], "recover_after": 20, "reopen_cooldown_cycles": 100,
                       "flap": {"flips": 12, "cycles": 12, "remind_hours": 720}, "intermittent": {"remind_hours": 1}})
     assert c.recover_after == 20 and c.flap.flips == 12 and c.intermittent.remind_hours == 1
+
+
+def test_at_a_long_interval_a_repeat_still_needs_a_new_failure(tmp_path):
+    """interval 6 h: the 48-cycle window is 12 days, far longer than the 24 h rate limit, so only the
+    'new failure since the last message' rule keeps three old blips from being re-announced every day."""
+    seq = ([CRIT] + [OK] * 12) * 3 + [OK] * 120
+    out, _ = drive(tmp_path, seq, len(seq), interval=21600, name="long")
+    assert [d.kind for _, d in out].count("intermittent") == 1
+    blips = ([CRIT] + [OK] * 12)
+    seq2 = blips * 3 + [OK] * 8 + blips * 2 + [OK] * 10      # two NEW failures: three are in the 48-cycle window again
+    out2, _ = drive(tmp_path, seq2, len(seq2), interval=21600, name="long2")
+    assert [d.kind for _, d in out2].count("intermittent") == 3     # one for each NEW failure (>= 24 h apart), none without

@@ -181,3 +181,40 @@ def test_random_cycles_hold_the_invariants(block):
         total += stats["messages"]
     assert not problems, "\n".join(problems[:15])
     assert total > 0
+
+
+def test_a_slow_but_successful_channel_costs_no_duplicates_and_never_fails_the_dead_man():
+    """Review 4 G7: a channel slower than its own budget but faster than the overall cap used to be re-sent every backoff
+    window and the dead-man failed forever. Now a late success is a delivery: exactly one send per decision."""
+    rng = random.Random(99)
+    plans = {c: make_plan(rng, 120) for c in CHECKS}
+
+    class Slow:
+        name, min_status = "slow", "info"
+
+        def __init__(self):
+            self.sent = []
+
+        def send(self, msg):
+            time.sleep(0.06)
+            self.sent.append(msg.text.splitlines()[0])
+            return alerts.SendResult(True)
+
+    cfg = config.parse({"apps": [{"name": "app0", "health": {"url": "https://a.example.com/"}}], "confirm": 2})
+    store = Store(":memory:")
+    slow = Slow()
+    disp = alerts.Dispatcher([slow], store, "u", channel_budget_s=0.03, budget_s=1.0)
+    step = {"i": 0}
+    rn = FakeRunner(lambda app, now: ((c, plans[c][step["i"]]) for c in CHECKS))
+    decisions = lost = 0
+    for i in range(120):
+        step["i"] = i
+        cr = cycle.run_cycle(cfg, store, rn, now=1_000_000 + i * 300, deadline_s=5)
+        dels = disp.dispatch(cr.decisions)
+        decisions += len(cr.decisions)
+        lost += runtime.cycle_lost(dels)
+        for d in dels:
+            if d.undelivered:
+                cycle.rollback_alert_state(store, d.decision)
+    assert decisions > 5 and len(slow.sent) == decisions and lost == 0
+    assert store.meta_get("bo:slow") is None

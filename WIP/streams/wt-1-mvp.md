@@ -206,3 +206,29 @@ Mutation check: [wt-1-mvp-mutate-fixpass3.py](wt-1-mvp-mutate-fixpass3.py), 34 m
 ## Deferred / not done
 
   -  Nothing from the review list is deferred. Still open from earlier passes: `heartbeat.url`, `MONITOR_SELF`, `probe_via_proxy`, silences (card [12]); a real-kernel check of `/proc/locks` and flock on `/mnt/c` (unverifiable here).  
+
+
+# Fix pass 4 (after REVIEW4-wt-1-mvp.md, verdict "fix then ship")
+
+Mutation check: [wt-1-mvp-mutate-fixpass4.py](wt-1-mvp-mutate-fixpass4.py), 24 mutants of the new code; first run 20 killed, 4 survived: one mutant was inert (rewritten), two were redundant layers that now have a combined mutant, one needed a long-interval test; all 24 are killed. Details: [implementation-notes.md](../../wiki/implementation-notes.md) "Review 4 fix pass".
+
+## Per item
+
+  [1]  The re-open rule is removed (see notes). `tests/test_state.py` (a failure right after a delivered recovery is a new episode and alerts at its second failing cycle), `tests/test_oracle.py` (the reviewer's probe p1 as a regression test, the undelivered-[OK] retry, and the 60 x 600 hidden-outage oracle: **0 hidden outages**), the earlier simulator unchanged and green.  
+  [2]  `tests/test_review4.py`: `ouououou` then unknown for 25 h reaches a crit-only channel with [BLIND] within ~40 minutes; a dropped alert is not remembered as sent; the hand-back goes out at crit when the dips were crit.  
+  [3]  [STABLE] never `/fail` and priority 3; no intermittent stream after a resolved flap or during/for alerted outages; the 1%-blips week; a repeat needs a new failure (also at a 6 h interval where the 24 h rate limit alone would not hold).  
+  [4]  The monitor-offline probe p3 as a test: no flap/intermittent state from suppressed cycles, and the later real outage is confirmed on the second failing cycle (was 50 minutes late); the earlier surviving mutant (guard removed) is killed.  
+  [5]  Exact undo, config-derived numbers, no "(0 state changes)" text, no reminder after 6 h of green at the 8x quiet period (p_8x).  
+  [6]  Table-driven: 30 nonsensical values, `.inf`/`.nan` from YAML text, upper bounds accepted at the limit.  
+  [7]  (a) a slow-but-successful send is a delivery (dispatcher test and a simulator test: exactly one send per decision, no backoff, dead-man never failed); the cap still bounds a channel that never answers; (b) a slow reconcile does not trip backoff; (c) SystemExit, KeyboardInterrupt, GeneratorExit are recorded failed sends, also for `test-alert`.  
+
+## Judgment calls to confirm
+
+  -  The owner now gets a fresh [CRIT] for every failure that returns after a delivered [OK] (until the flap detector declares [FLAPPING]); chatty chaotic histories reach about 25 messages a check a day (bound 30 in the oracle).  
+  -  `reopen_cooldown_cycles` is reserved (accepted, bounded, no effect).  
+  -  After monitor-offline suppression ends, a failing check needs `confirm` fresh cycles (unchanged from pass 3).  
+  -  A recovery's [OK] is only ever "owed" through the rollback of an undelivered one; a warn-level recovery that no channel is configured for counts as delivered-by-design (nothing to retry).  
+
+## Deferred / not done
+
+  -  Nothing from the review. Unchanged: `heartbeat.url`, `MONITOR_SELF`, `probe_via_proxy`, silences (card [12]); old `flips:*`/`flap_alerted:*` meta keys from before pass 3 are orphaned after upgrade (harmless); a real-kernel check of `/proc/locks` and flock on `/mnt/c`.  
