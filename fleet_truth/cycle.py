@@ -177,12 +177,13 @@ def run_cycle(cfg: Config, store: Store, runner, *, now: float | None = None,
             store.put_state(row)
             if decision is not None:
                 cr.decisions.append(decision)
-            elif (app, check) not in suppressed and row.alerted_status not in ("warn", "crit"):
+            elif (app, check) not in suppressed:
                 n = flap.observe(store, app, check, prev.status if prev else None, res.status, now,
                                  cfg.flap.cycles * cfg.interval_seconds, cfg.flap.flips, cfg.flap.remind_hours * 3600)
                 if n:
+                    n, lvl = n
                     cr.decisions.append(AlertDecision(
-                        "flapping", app, check, "warn", "warn", "FLAPPING",
+                        "flapping", app, check, "warn", lvl, "FLAPPING",
                         f"changed state {n} times in the last {cfg.flap.cycles} cycles; each dip is too short to confirm, "
                         f"so no failure alert fires (latest: {res.verdict})", row.since, row.consecutive,
                         row.alerted_status, row.last_alert_at))

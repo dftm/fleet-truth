@@ -403,7 +403,7 @@ def test_alternating_check_raises_one_rate_limited_flapping_warn(store):
     for i in range(60):   # 5 hours of 5-minute cycles
         cr = cycle.run_cycle(cfg, store, rn, now=1_000_000 + i * 300, deadline_s=5)
         kinds += [(i, d.kind, d.level) for d in cr.decisions]
-    assert [(k, lv) for _, k, lv in kinds] == [("flapping", "warn")], "never a failure alert, exactly one flapping warn"
+    assert [(k, lv) for _, k, lv in kinds] == [("flapping", "crit")], "never a failure alert, exactly one flapping (crit: the dips were crit)"
     assert kinds[0][0] == 6  # sixth flip (cycle index 6, first result has no previous)
     more = []
     for i in range(60, 100):  # past the 6 h rate limit: one reminder at most
@@ -412,22 +412,33 @@ def test_alternating_check_raises_one_rate_limited_flapping_warn(store):
     assert more == ["flapping"]
 
 
-def test_crit_unknown_and_crit_warn_alternation_flap_but_ok_info_and_steady_failure_do_not(store):
-    cfg = mkcfg(access=False, n=1)
-    rn = alt_runner([CheckResult("crit", "DOWN"), CheckResult("unknown", "U")])
-    got = [d.kind for i in range(14) for d in cycle.run_cycle(cfg, store, rn, now=2_000_000 + i * 300, deadline_s=5).decisions]
-    assert got == ["flapping"]  # crit<->unknown never confirms either; the status changes are counted
+def test_crit_unknown_and_crit_warn_alternation_is_one_real_alert_not_a_flap(tmp_path):
+    for i, seq in enumerate(([CheckResult("crit", "DOWN"), CheckResult("unknown", "U")],
+                             [CheckResult("crit", "DOWN"), CheckResult("warn", "W")])):
+        store = Store(tmp_path / f"s{i}.db")
+        cfg = mkcfg(access=False, n=1)
+        rn = alt_runner(seq)
+        got = [(d.kind, d.level) for j in range(14)
+               for d in cycle.run_cycle(cfg, store, rn, now=2_000_000 + i * 900_000 + j * 300, deadline_s=5).decisions]
+        assert got == [("alert", "crit")]
+    store = Store(tmp_path / "s9.db")
     cfg3 = mkcfg(access=False, n=1)
-    rn = alt_runner([CheckResult("crit", "DOWN"), CheckResult("warn", "W")])
-    got = [d.kind for i in range(14) for d in cycle.run_cycle(cfg3, store, rn, now=2_500_000 + i * 300, deadline_s=5).decisions]
-    assert got == ["flapping"]
     rn = alt_runner([OK, CheckResult("info", "I")])
     got = [d.kind for i in range(30) for d in cycle.run_cycle(cfg3, store, rn, now=2_800_000 + i * 300, deadline_s=5).decisions]
     assert got == []   # ok <-> info is not a flip
+
+
+def test_flapping_that_included_crit_is_crit_and_warn_only_flapping_is_warn(store):
+    cfg = mkcfg(access=False, n=1)
+    rn = alt_runner([CheckResult("crit", "DOWN"), OK])
+    lv = [d.level for i in range(14) for d in cycle.run_cycle(cfg, store, rn, now=5_000_000 + i * 300, deadline_s=5).decisions
+          if d.kind == "flapping"]
+    assert lv == ["crit"]
     cfg2 = mkcfg(access=False, n=1)
-    steady = alt_runner([CheckResult("crit", "DOWN")])
-    got = [d.kind for i in range(30) for d in cycle.run_cycle(cfg2, store, steady, now=3_000_000 + i * 300, deadline_s=5).decisions]
-    assert got == ["alert"]
+    rn = alt_runner([CheckResult("warn", "W"), OK])
+    lv = [d.level for i in range(14) for d in cycle.run_cycle(cfg2, store, rn, now=6_000_000 + i * 300, deadline_s=5).decisions
+          if d.kind == "flapping"]
+    assert lv == ["warn"]
 
 
 def test_slow_flipping_outside_the_window_does_not_flap(store):

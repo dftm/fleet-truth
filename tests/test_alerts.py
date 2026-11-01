@@ -701,3 +701,25 @@ def test_each_scrub_layer_works_alone(tmp_path):
     out = alerts.Dispatcher([Careless()], store, "u")._send(Careless(), alerts.format_message(decision(), "u"))
     assert TOKEN not in out.error
     assert TOKEN not in store.db.execute("SELECT error FROM alerts").fetchone()[0]
+
+
+# ------------------------------------------------------------------ review 2 R1 end to end
+def test_crit_unknown_alternation_for_24h_reaches_a_crit_only_channel(tmp_path):
+    cfg = dm_cfg(tmp_path, TG)
+    seq = [CheckResult("crit", "TIMEOUT", "x"), CheckResult("unknown", "TIMEOUT_CYCLE", "y")]
+    n = {"i": 0}
+
+    class R:
+        def __init__(self, *a, **k): pass
+        def run_app(self, app, now):
+            n["i"] += 1
+            yield "HEALTHZ", seq[n["i"] % 2]
+
+    stub = Stub()
+    delivered = []
+    for i in range(288):
+        o = runtime.run_once(cfg, runner_factory=R, now=1_000_000 + i * 300, fetch=stub)
+        delivered += [d for d in o.deliveries if d.delivered]
+        o.store.close()
+    tg = [c for c in stub.calls if "telegram" in c["url"]]
+    assert len(tg) >= 4 and json.loads(tg[0]["body"])["text"].startswith("[CRIT] a HEALTHZ")

@@ -34,8 +34,15 @@ class AlertDecision:
     prev_last_alert_at: int | None = None
 
 
+BAD_RANK = {"unknown": 1, "warn": 2, "crit": 3}
+
+
 def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: float, confirm: int,
             blind_level: str = "crit") -> tuple[StateRow, AlertDecision | None]:
+    """An *episode* is a run of non-healthy results in any mix of crit, warn and unknown; only ok/info ends it.
+    `confirm` counts episode cycles, the alert level is the WORST status of a failure kind seen in the episode
+    (crit > warn), and unknown time counts toward the blind timer, so a check alternating crit and unknown
+    cannot hide. A healthy result ends the episode at once (recovery alert if one was sent)."""
     now_i = int(now)
     same = prev is not None and prev.status == r.status
     since = prev.since if same else now_i
@@ -44,27 +51,41 @@ def advance(prev: StateRow | None, app: str, check: str, r: CheckResult, now: fl
     last_at = prev.last_alert_at if prev else None
     silenced = prev.silenced_until if prev else None
     decision = None
+    bad = r.status not in HEALTHY
+    in_episode = bad and prev is not None and prev.status not in HEALTHY and prev.unhealthy_since is not None
+    if bad:
+        ep_since = prev.unhealthy_since if in_episode else now_i
+        ep_cycles = (prev.unhealthy_cycles if in_episode else 0) + 1
+        worst, worst_v = r.status, r.verdict
+        if in_episode and prev.worst_status and BAD_RANK[prev.worst_status] >= BAD_RANK[r.status]:
+            worst, worst_v = prev.worst_status, prev.worst_verdict
+    else:
+        ep_since, ep_cycles, worst, worst_v = None, 0, None, None
 
-    def mk(kind: str, level: str) -> AlertDecision:
-        return AlertDecision(kind, app, check, r.status, level, r.verdict, r.detail, since, consecutive,
+    def mk(kind: str, level: str, detail: str | None = None) -> AlertDecision:
+        return AlertDecision(kind, app, check, r.status, level, worst_v if bad and worst != "unknown" else r.verdict,
+                             detail if detail is not None else r.detail, ep_since if bad else since, ep_cycles if bad else consecutive,
                              prev.alerted_status if prev else None, prev.last_alert_at if prev else None)
 
-    if r.status in ("warn", "crit"):
-        if consecutive >= confirm:
-            if alerted != r.status:
-                decision = mk("alert", r.status)
-                alerted, last_at = r.status, now_i
-            elif last_at is not None and now_i - last_at >= REMINDER_S[r.status]:
-                decision = mk("reminder", r.status)
-                last_at = now_i
-    elif r.status == "unknown":
-        if now_i - since >= BLIND_AFTER_S and alerted != "unknown":
+    if bad:
+        detail = r.detail
+        if worst in ("warn", "crit") and r.status != worst:
+            detail = f"{r.detail} (worst in this episode: {worst} {worst_v})"
+        if worst in ("warn", "crit"):
+            if ep_cycles >= confirm:
+                if alerted != worst:
+                    decision = mk("alert", worst, detail)
+                    alerted, last_at = worst, now_i
+                elif last_at is not None and now_i - last_at >= REMINDER_S[worst]:
+                    decision = mk("reminder", worst, detail)
+                    last_at = now_i
+        elif now_i - ep_since >= BLIND_AFTER_S and alerted != "unknown":
             decision = mk("blind", blind_level)
             alerted, last_at = "unknown", now_i
-    else:  # healthy
-        if alerted is not None:
-            level = alerted if alerted in ("warn", "crit") else "warn"
-            decision = mk("recovered", level)
-            alerted, last_at = None, None
-    row = StateRow(app, check, r.status, r.verdict, since, consecutive, alerted, last_at, silenced)
+    elif alerted is not None:
+        level = alerted if alerted in ("warn", "crit") else "warn"
+        decision = mk("recovered", level)
+        alerted, last_at = None, None
+    row = StateRow(app, check, r.status, r.verdict, since, consecutive, alerted, last_at, silenced,
+                   ep_since, ep_cycles, worst, worst_v)
     return row, decision

@@ -73,11 +73,12 @@ def test_blip_does_not_arm_a_recovery():
     assert kinds(out) == []
 
 
-def test_status_change_resets_the_confirm_counter():
-    out, _ = drive(["crit", "warn", "crit", "warn"])
-    assert kinds(out) == []
+def test_mixed_unhealthy_statuses_form_one_episode_and_alert_at_the_worst_level():
+    out, row = drive(["crit", "warn", "crit", "warn"])
+    assert kinds(out) == ["alert"] and out[1][1] == "alert"        # confirm counts episode cycles, not same-status runs
+    assert row.alerted_status == "crit" and row.worst_status == "crit" and row.unhealthy_cycles == 4
     out, _ = drive(["warn", "warn", "crit", "crit"])
-    assert kinds(out) == ["alert", "alert"]  # escalation alerts again once confirmed
+    assert kinds(out) == ["alert", "alert"] and out[2][1] == "alert"   # escalation is immediate once the episode is confirmed
 
 
 def test_confirm_one_alerts_immediately():
@@ -133,3 +134,50 @@ def test_blind_decision_level_defaults_to_crit_and_is_configurable():
             if d:
                 assert d.kind == "blind" and d.level == expect
         assert row.alerted_status == "unknown"
+
+
+# ------------------------------------------------------------------ review 2 R1: crit/unknown cannot hide
+def decisions(seq, confirm=2, **kw):
+    row, out = None, []
+    for i, st in enumerate(seq):
+        row, d = advance(row, "a", "c", CheckResult(st, "V", "d"), 1_000_000 + i * STEP, confirm, **kw)
+        if d:
+            out.append((i, d))
+    return out, row
+
+
+def test_24h_crit_unknown_alternation_alerts_crit():
+    out, row = decisions(["crit", "unknown"] * 144)                 # 288 cycles = 24 h
+    first = out[0][1]
+    assert out[0][0] == 1 and (first.kind, first.level) == ("alert", "crit")
+    assert [d.kind for _, d in out] == ["alert"] + ["reminder"] * 3  # 6 h reminders after the first
+    assert all(d.level == "crit" for _, d in out)
+
+
+def test_one_crit_then_five_unknowns_delivers_a_crit_alert():
+    out, _ = decisions(["crit"] + ["unknown"] * 5)
+    assert [(i, d.kind, d.level) for i, d in out] == [(1, "alert", "crit")]
+    assert "worst in this episode: crit V" in out[0][1].detail
+
+
+def test_unknown_time_counts_toward_blind_timer_even_after_a_warn_blip_free_run():
+    out, _ = decisions(["unknown"] * 7)
+    assert [d.kind for _, d in out] == ["blind"] and out[0][0] == 6
+
+
+def test_genuine_recovery_ends_the_episode_and_a_new_one_starts_clean():
+    out, row = decisions(["crit", "unknown", "ok", "unknown", "unknown"])
+    assert [d.kind for _, d in out] == ["alert", "recovered"]
+    assert row.unhealthy_cycles == 2 and row.worst_status == "unknown"   # the new episode did not inherit crit
+    out, _ = decisions(["crit", "unknown", "ok", "unknown", "unknown", "crit"])
+    assert [d.kind for _, d in out] == ["alert", "recovered", "alert"]
+
+
+def test_blind_then_crit_in_the_same_episode_alerts_crit():
+    out, _ = decisions(["unknown"] * 7 + ["crit"])
+    assert [d.kind for _, d in out] == ["blind", "alert"] and out[1][1].level == "crit"
+
+
+def test_oscillation_with_ok_still_does_not_confirm():
+    out, _ = decisions(["crit", "ok"] * 10)
+    assert out == []

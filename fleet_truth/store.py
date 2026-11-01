@@ -36,6 +36,13 @@ MIGRATIONS = [
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE INDEX results_observed ON results(observed_at);
     """,
+    # version 2: episode tracking (an unhealthy episode = a run of non-ok/info results, whatever their mix)
+    """
+    ALTER TABLE check_state ADD COLUMN unhealthy_since INTEGER;
+    ALTER TABLE check_state ADD COLUMN unhealthy_cycles INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE check_state ADD COLUMN worst_status TEXT;
+    ALTER TABLE check_state ADD COLUMN worst_verdict TEXT;
+    """,
 ]
 
 
@@ -54,6 +61,16 @@ class StateRow:
     alerted_status: str | None = None
     last_alert_at: int | None = None
     silenced_until: int | None = None
+    unhealthy_since: int | None = None   # start of the current episode (last time the check was ok/info)
+    unhealthy_cycles: int = 0            # non-healthy cycles in the episode, any mix of crit/warn/unknown
+    worst_status: str | None = None      # worst of crit > warn > unknown seen in the episode
+    worst_verdict: str | None = None
+
+
+def _row(r) -> "StateRow":
+    return StateRow(r["app"], r["check_name"], r["status"], r["verdict"], r["since"], r["consecutive"],
+                    r["alerted_status"], r["last_alert_at"], r["silenced_until"], r["unhealthy_since"],
+                    r["unhealthy_cycles"], r["worst_status"], r["worst_verdict"])
 
 
 def _cap_json(data: dict) -> str:
@@ -119,23 +136,21 @@ class Store:
     def get_state(self, app: str, check: str) -> StateRow | None:
         with self._lock:
             r = self.db.execute("SELECT * FROM check_state WHERE app=? AND check_name=?", (app, check)).fetchone()
-        return None if r is None else StateRow(r["app"], r["check_name"], r["status"], r["verdict"], r["since"],
-                                               r["consecutive"], r["alerted_status"], r["last_alert_at"],
-                                               r["silenced_until"])
+        return None if r is None else _row(r)
 
     def put_state(self, s: StateRow) -> None:
         with self._lock:
             self.db.execute(
                 "INSERT OR REPLACE INTO check_state(app,check_name,status,verdict,since,consecutive,alerted_status,"
-                "last_alert_at,silenced_until) VALUES (?,?,?,?,?,?,?,?,?)",
+                "last_alert_at,silenced_until,unhealthy_since,unhealthy_cycles,worst_status,worst_verdict)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (s.app, s.check, s.status, s.verdict, s.since, s.consecutive, s.alerted_status, s.last_alert_at,
-                 s.silenced_until))
+                 s.silenced_until, s.unhealthy_since, s.unhealthy_cycles, s.worst_status, s.worst_verdict))
 
     def all_states(self) -> list[StateRow]:
         with self._lock:
             rows = self.db.execute("SELECT * FROM check_state ORDER BY app, check_name").fetchall()
-        return [StateRow(r["app"], r["check_name"], r["status"], r["verdict"], r["since"], r["consecutive"],
-                         r["alerted_status"], r["last_alert_at"], r["silenced_until"]) for r in rows]
+        return [_row(r) for r in rows]
 
     # ---- alerts
     def record_alert(self, app: str | None, check: str | None, status: str | None, channel: str, sent_at: float,
