@@ -4,11 +4,23 @@ from __future__ import annotations
 import argparse
 import sys
 
+from . import config as cfgmod
 from . import version
 
 
 def _stub(name: str) -> int:
     print(f"fleet-truth {name}: not implemented")
+    return 0
+
+
+def _check_config(path: str) -> int:
+    try:
+        cfg = cfgmod.load(path)
+    except cfgmod.ConfigError as e:
+        for line in e.errors:
+            print(f"config error: {line}", file=sys.stderr)
+        return 3
+    print(cfgmod.render_plan(cfg))
     return 0
 
 
@@ -18,7 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", metavar="{once,serve,check-config}")
     sub.add_parser("once", help="run one check cycle and exit (exit code = worst status)")
     sub.add_parser("serve", help="serve the status page and run the cycle loop")
-    sub.add_parser("check-config", help="validate fleet.yaml and print the resolved plan")
+    cc = sub.add_parser("check-config", help="validate fleet.yaml and print the resolved plan")
+    cc.add_argument("path", metavar="PATH", help="path to fleet.yaml")
     return p
 
 
@@ -27,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd is None:
         build_parser().print_help()
         return 0
+    if args.cmd == "check-config":
+        return _check_config(args.path)
     return _stub(args.cmd)
 
 
