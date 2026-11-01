@@ -584,19 +584,70 @@ def parse(data: Any) -> Config:
     return cfg
 
 
+MAX_FILE_BYTES = 64 * 1024
+MAX_DEPTH = 12
+MAX_NODES = 5000
+
+
+class _StrictLoader(yaml.SafeLoader):
+    """SafeLoader that rejects duplicate keys (YAML otherwise keeps the last silently)."""
+
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for k, _v in node.value:
+            key = self.construct_object(k, deep=True)
+            if isinstance(key, (str, int, float, bool)) and key in seen:
+                raise ConfigError([f"duplicate key '{key}' (line {k.start_mark.line + 1})"])
+            seen.add(key)
+        return super().construct_mapping(node, deep)
+
+
+def _check_shape(doc: Any) -> None:
+    stack = [(doc, 1)]
+    nodes = 0
+    while stack:
+        n, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_NODES:
+            raise ConfigError([f"<root>: more than {MAX_NODES} values; fleet.yaml is not meant to be that big"])
+        if depth > MAX_DEPTH:
+            raise ConfigError([f"<root>: nesting deeper than {MAX_DEPTH} levels"])
+        if isinstance(n, dict):
+            stack.extend((v, depth + 1) for v in n.values())
+        elif isinstance(n, list):
+            stack.extend((v, depth + 1) for v in n)
+
+
+def parse_text(text: str, where: str = "fleet.yaml") -> Config:
+    """Size cap, no anchors/aliases/merge keys (alias bombs), no duplicate keys, depth and node caps."""
+    if len(text.encode("utf-8", "replace")) > MAX_FILE_BYTES:
+        raise ConfigError([f"{where}: larger than {MAX_FILE_BYTES // 1024} KB"])
+    if text.count("[") + text.count("{") > MAX_NODES:  # the scanner is superlinear on deep flow nesting
+        raise ConfigError([f"{where}: too many flow collections ('[' or '{{')"])
+    try:
+        for tok in yaml.scan(text, Loader=yaml.SafeLoader):
+            if isinstance(tok, (yaml.AnchorToken, yaml.AliasToken)):
+                raise ConfigError([f"{where}: line {tok.start_mark.line + 1}: YAML anchors and aliases are not allowed"])
+        data = yaml.load(text, Loader=_StrictLoader)  # noqa: S506 - SafeLoader subclass
+    except ConfigError:
+        raise
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        raise ConfigError([f"{where}:{' line ' + str(mark.line + 1) if mark else ''} invalid YAML"]) from None
+    except RecursionError:
+        raise ConfigError([f"{where}: nesting too deep"]) from None
+    _check_shape(data)
+    return parse(data)
+
+
 def load(path: str | Path) -> Config:
     p = Path(path).expanduser()
     try:
-        text = p.read_text()
+        with open(p, "rb") as f:
+            raw = f.read(MAX_FILE_BYTES + 1)
     except OSError as e:
         raise ConfigError([f"{p}: cannot read ({e.strerror or type(e).__name__})"]) from None
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as e:
-        mark = getattr(e, "problem_mark", None)
-        where = f" line {mark.line + 1}" if mark else ""
-        raise ConfigError([f"{p}:{where} invalid YAML"]) from None
-    return parse(data)
+    return parse_text(raw.decode("utf-8", "replace"), str(p))
 
 
 # ----------------------------------------------------------------------------- plan

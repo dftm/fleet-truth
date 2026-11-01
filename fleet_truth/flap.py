@@ -24,7 +24,7 @@ def observe(store: Store, app: str, check: str, prev_status: str | None, status:
         hist = [t for t in json.loads(store.meta_get(key) or "[]") if now - t <= window_s]
     except ValueError:
         hist = []
-    if (prev_status in GOOD) != (status in GOOD):
+    if prev_status != status and not (prev_status in GOOD and status in GOOD):  # ok<->info is not a flip
         hist.append(int(now))
     store.meta_set(key, json.dumps(hist))
     if len(hist) < flips:

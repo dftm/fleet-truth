@@ -192,3 +192,47 @@ def test_tests_cannot_touch_the_real_home(tmp_path):
     from pathlib import Path
     assert str(Path("~/x").expanduser()) == os.path.join(os.environ["HOME"], "x")
     assert "pytest" in os.environ["HOME"] or str(tmp_path.parent) in os.environ["HOME"] or "home" in os.environ["HOME"]
+
+
+# ------------------------------------------------------------------ YAML hardening (review F10)
+import time as _time  # noqa: E402
+
+BOMB = "a: &a [x, x, x, x, x, x, x, x, x]\n" + "".join(
+    f"{chr(98 + i)}: &{chr(98 + i)} [{', '.join(['*' + chr(97 + i)] * 9)}]\n" for i in range(9)) + "apps: [{name: a}]\n"
+
+
+def test_alias_bomb_is_rejected_fast(tmp_path):
+    f = tmp_path / "f.yaml"
+    f.write_text(BOMB)
+    t0 = _time.monotonic()
+    with pytest.raises(config.ConfigError) as e:
+        config.load(f)
+    assert _time.monotonic() - t0 < 1.0 and "anchors and aliases" in e.value.errors[0]
+
+
+def test_anchors_merge_keys_and_duplicates_rejected(tmp_path):
+    for text, needle in (
+        ("x: &anc 1\napps: [{name: a}]\n", "anchors and aliases"),
+        ("d: &d {name: a}\napps: [*d]\n", "anchors and aliases"),
+        ("apps: [{name: a}]\ninterval_seconds: 60\ninterval_seconds: 70\n", "duplicate key 'interval_seconds'"),
+        ("apps: [{name: a, name: b}]\n", "duplicate key 'name'"),
+    ):
+        with pytest.raises(config.ConfigError) as e:
+            config.parse_text(text)
+        assert needle in e.value.errors[0], text
+
+
+def test_size_depth_and_node_caps():
+    with pytest.raises(config.ConfigError) as e:
+        config.parse_text("# " + "x" * 70000 + "\napps: [{name: a}]\n")
+    assert "KB" in e.value.errors[0]
+    with pytest.raises(config.ConfigError):
+        config.parse_text("a: " + "[" * 30 + "]" * 30 + "\napps: [{name: a}]\n")
+    with pytest.raises(config.ConfigError):
+        config.parse_text("apps: [{name: a}]\nz: [" + ",".join(["1"] * 6000) + "]\n")
+    with pytest.raises(config.ConfigError):  # recursion in the parser itself
+        config.parse_text("a: " + "[" * 20000 + "\n")
+
+
+def test_example_still_loads_under_the_strict_loader():
+    assert len(config.load("fleet.example.yaml").apps) == 5

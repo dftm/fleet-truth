@@ -412,11 +412,18 @@ def test_alternating_check_raises_one_rate_limited_flapping_warn(store):
     assert more == ["flapping"]
 
 
-def test_unhealthy_to_unhealthy_alternation_is_not_a_flip_and_steady_failure_does_not_flap(store):
+def test_crit_unknown_and_crit_warn_alternation_flap_but_ok_info_and_steady_failure_do_not(store):
     cfg = mkcfg(access=False, n=1)
     rn = alt_runner([CheckResult("crit", "DOWN"), CheckResult("unknown", "U")])
     got = [d.kind for i in range(14) for d in cycle.run_cycle(cfg, store, rn, now=2_000_000 + i * 300, deadline_s=5).decisions]
-    assert got == []  # crit<->unknown are both unhealthy: not a flip (a known gap: it also never confirms, see implementation-notes)
+    assert got == ["flapping"]  # crit<->unknown never confirms either; the status changes are counted
+    cfg3 = mkcfg(access=False, n=1)
+    rn = alt_runner([CheckResult("crit", "DOWN"), CheckResult("warn", "W")])
+    got = [d.kind for i in range(14) for d in cycle.run_cycle(cfg3, store, rn, now=2_500_000 + i * 300, deadline_s=5).decisions]
+    assert got == ["flapping"]
+    rn = alt_runner([OK, CheckResult("info", "I")])
+    got = [d.kind for i in range(30) for d in cycle.run_cycle(cfg3, store, rn, now=2_800_000 + i * 300, deadline_s=5).decisions]
+    assert got == []   # ok <-> info is not a flip
     cfg2 = mkcfg(access=False, n=1)
     steady = alt_runner([CheckResult("crit", "DOWN")])
     got = [d.kind for i in range(30) for d in cycle.run_cycle(cfg2, store, steady, now=3_000_000 + i * 300, deadline_s=5).decisions]
