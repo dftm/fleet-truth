@@ -8,24 +8,7 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
 
   -  Cards [1]-[7] are built on branch `wt/1-mvp` (worktree `/home/dftms/worktrees/fleet-truth/wt-1-mvp`), one commit per card, 236 tests green. Awaiting the separate adversarial reviewer and the owner steps listed in [WIP/streams/wt-1-mvp.md](WIP/streams/wt-1-mvp.md). Not merged to `main`.  
 
-## Backlog Index
-
-  -  [1] Scaffold: package, CLI, version, tests -- 2 h  
-  -  [2] fleet.yaml loader and validation -- 3 h  
-  -  [3] Pinned HTTP probe: HEALTHZ, DEEP_PROBE, TLS_EXPIRY -- 6 h  
-  -  [4] Git mirror, DRIFT and UNPUSHED (port the spike) -- 5 h  
-  -  [5] File checks: BACKUP_AGE, HEARTBEAT, STALE_BUILD -- 3 h  
-  -  [6] SQLite store, cycle runner, flap guard -- 5 h  
-  -  [7] Alerts and dead-man ping -- 4 h  
-  -  [8] Status page, WSL runbook, first live run -- 5 h  
-  -  [9] Apps report a commit to the fleet token (cross-repo) -- 1 d over 5 repos  
-  -  [10] Access service token: setup, correlation, expiry -- 3 h  
-  -  [11] Docker image and Access-gated exposure -- 6 h  
-  -  [12] SPLIT_BRAIN, silences, daily digest -- 5 h  
-  -  [13] Adversarial security review of the whole app -- 4 h  
-  -  [14] Contracts for other users: version snippet and status-file spec -- 4 h  
-
-## Backlog
+## Needs review
 
 ### [1] Scaffold: package, CLI, version, tests
 
@@ -136,6 +119,26 @@ Every card is reviewed by a separate adversarial agent that sees only the card a
        [3]  `fleet-truth test-alert` subcommand sends one `[TEST]` message to every configured channel and prints per-channel ok/failed.  
   -  **Rollback:** revert commit(s); remove the alert env vars to silence it.  
   -  **Done when:** acceptance passes; owner received a real `[TEST]` on his chosen channel (open question Q3); reviewer closed.  
+
+
+## Backlog Index
+
+  -  [1] Scaffold: package, CLI, version, tests -- 2 h  
+  -  [2] fleet.yaml loader and validation -- 3 h  
+  -  [3] Pinned HTTP probe: HEALTHZ, DEEP_PROBE, TLS_EXPIRY -- 6 h  
+  -  [4] Git mirror, DRIFT and UNPUSHED (port the spike) -- 5 h  
+  -  [5] File checks: BACKUP_AGE, HEARTBEAT, STALE_BUILD -- 3 h  
+  -  [6] SQLite store, cycle runner, flap guard -- 5 h  
+  -  [7] Alerts and dead-man ping -- 4 h  
+  -  [8] Status page, WSL runbook, first live run -- 5 h  
+  -  [9] Apps report a commit to the fleet token (cross-repo) -- 1 d over 5 repos  
+  -  [10] Access service token: setup, correlation, expiry -- 3 h  
+  -  [11] Docker image and Access-gated exposure -- 6 h  
+  -  [12] SPLIT_BRAIN, silences, daily digest -- 5 h  
+  -  [13] Adversarial security review of the whole app -- 4 h  
+  -  [14] Contracts for other users: version snippet and status-file spec -- 4 h  
+
+## Backlog
 
 ### [8] Status page, WSL runbook, first live run
 
