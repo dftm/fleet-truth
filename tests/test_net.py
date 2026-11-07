@@ -28,12 +28,12 @@ def res_to(*ips):
     "https://127.0.0.1/", "https://[::1]/", "https://169.254.169.254/latest/meta-data/", "https://0.0.0.0/",
     "https://[::ffff:127.0.0.1]/", "https://2130706433/", "https://0x7f000001/", "https://127.1/",
     "https://0177.0.0.1/", "https://[fd00:ec2::254]/", "https://[2002:7f00:1::]/", "https://[64:ff9b::7f00:1]/",
-    "https://[::ffff:169.254.169.254]/", "https://10.0.0.5/", "https://192.168.1.1/", "https://100.100.40.10/",
+    "https://[::ffff:169.254.169.254]/", "https://10.0.0.5/", "https://192.168.1.1/", "https://100.64.0.10/",
     "https://0.1.2.3/", "https://255.255.255.255/", "https://[::ffff:7f00:1]/", "https://[::127.0.0.1]/", "https://127.0.0.1@evil.example.com/",
 ])
 @pytest.mark.parametrize("allow_private", [False, True])
 def test_literal_hosts_refused_before_any_socket(url, allow_private):
-    private_ok = url in ("https://10.0.0.5/", "https://192.168.1.1/", "https://100.100.40.10/")
+    private_ok = url in ("https://10.0.0.5/", "https://192.168.1.1/", "https://100.64.0.10/")
     if private_ok and allow_private:
         t = net.parse_url(url, True)
         assert net.validate_addresses(t, True, None, None)  # accepted by policy
@@ -45,7 +45,7 @@ def test_literal_hosts_refused_before_any_socket(url, allow_private):
 
 
 def test_allow_private_accepts_rfc1918_and_tailnet_but_never_loopback_or_linklocal():
-    for ip in ("10.1.2.3", "192.168.0.9", "172.16.5.5", "100.100.40.10"):
+    for ip in ("10.1.2.3", "192.168.0.9", "172.16.5.5", "100.64.0.10"):
         assert net.blocked_reason(ipaddress.ip_address(ip), True) is None
         assert net.blocked_reason(ipaddress.ip_address(ip), False) is not None
     for ip in ("127.0.0.1", "127.9.9.9", "::1", "169.254.169.254", "169.254.1.1", "0.0.0.0", "0.5.5.5",
@@ -429,7 +429,7 @@ def test_allow_loopback_does_not_resolve_names_to_loopback():
         assert e.value.kind == "BLOCKED"
 
 
-@pytest.mark.parametrize("url", ["http://10.0.0.5/", "http://192.168.1.1/", "http://100.100.40.10/", "http://169.254.169.254/",
+@pytest.mark.parametrize("url", ["http://10.0.0.5/", "http://192.168.1.1/", "http://100.64.0.10/", "http://169.254.169.254/",
                                  "http://100.100.100.200/", "http://0.0.0.0/", "http://[fd00:ec2::254]/", "http://[::ffff:127.0.0.1]/",
                                  "http://[fe80::1]/", "http://224.0.0.1/", "http://metadata.google.internal/", "http://[::]/",
                                  "http://2130706433/", "http://127.1/"])
@@ -440,7 +440,7 @@ def test_allow_loopback_admits_no_other_address_class(url):
 
 
 def test_allow_loopback_does_not_widen_allow_private_and_vice_versa():
-    for ip in ("10.1.2.3", "100.100.40.10"):
+    for ip in ("10.1.2.3", "100.64.0.10"):
         t = net.parse_url(f"https://{ip}/", True, True)
         assert net.validate_addresses(t, True, None, None, None, True) == [ip]        # allow_private still does that
         with pytest.raises(net.FetchError):

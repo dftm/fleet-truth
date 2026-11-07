@@ -6,7 +6,7 @@
 
 A solo developer runs 5 to 20 small apps on one or two VPSes, deployed by hand or by a thin CI step. Uptime monitors answer "does the URL return 200?". The failures that actually hurt this fleet were all invisible to that question:
 
-  -  **jobs.dftm.cloud, 2026-09-20.** A commit from another machine (`cca46b3`, fail-closed Access guard) rode along in a local build. Every path returned 503 for minutes; `/healthz` answered 200 throughout because that commit exempts it on purpose. Source: [feedback_check_git_log_before_deploying.md](/home/dftms/.claude/projects/-home-dftms/memory/feedback_check_git_log_before_deploying.md).  
+  -  **jobs.example.com, 2026-09-20.** A commit from another machine (`cca46b3`, fail-closed Access guard) rode along in a local build. Every path returned 503 for minutes; `/healthz` answered 200 throughout because that commit exempts it on purpose. Source: [feedback_check_git_log_before_deploying.md](/home/dftms/.claude/projects/-home-dftms/memory/feedback_check_git_log_before_deploying.md).  
   -  **events-app, 2026-10-22.** The live Sources/Leads feature ran from 4 commits that existed only on the laptop (`git log origin/main..HEAD`: 5636828, fb79b3d, 71ec2c0, bce4129). A disk loss would have lost the code of a running feature. Source: [audit/events-app.md](/home/dftms/worktrees/maintenance-run-20261031/audit/events-app.md) EV header.  
   -  **events-app public 404.** The tailnet container was recreated, the Access-facing `app-access` container was not, so two containers served two different images ([audit EV-01](/home/dftms/worktrees/maintenance-run-20261031/audit/events-app.md)).  
   -  **investo-bot** sat with 34 unpushed commits ([repo-sync-check.py](/home/dftms/claude-self/scripts/repo-sync-check.py) docstring).  
@@ -28,11 +28,11 @@ Measured from the repos on 2026-11-01. "commit today" = what `/api/version` woul
 
 | App | Local clone | Branch | Public host | Version endpoint | commit today | Backup status file |
 |---|---|---|---|---|---|---|
-| jobs dashboard | `~/skills-n-bills` | `master` | jobs.dftm.cloud | `GET /api/version` behind origin Access guard (`app/jobs/main.py`) | null (workflow passes no `GIT_SHA`) | `~/.local/state/backup-pull/<APP_NAME>/status.json` once `wt/111-backup` lands |
-| health-web | `~/health-web` | `main` | health.dftm.cloud | `GET /api/version` behind guard; service tokens limited to `SERVICE_PATHS`, which exclude it (`healthapp/access.py`) | null (audit HW-21) | same pattern, `wt/10006-backup` |
-| investo-bot | `~/investo-bot` | `master` | investobot.dftm.cloud | `GET /api/version` behind guard (`web/app.py`) | null | n/a; daemon writes a heartbeat `status.json` and can push `HEARTBEAT_PUSH_URL` (`runtime/daemon.py`) |
-| invoicing | `~/invoicing` | `main` | invoicing.dftm.cloud | none: Streamlit, version only in the sidebar (`wiki/ops-deploy.md`) | n/a | same pattern, `wt/63-backup` |
-| events-app | `~/events-app` | `main` | events.dftm.cloud | none; `/healthz` on the Access listener is loopback-only (403 from outside, `web.py` `_access_gate`) | n/a | same pattern, `wt/67-backup` |
+| jobs dashboard | `~/skills-n-bills` | `master` | jobs.example.com | `GET /api/version` behind origin Access guard (`app/jobs/main.py`) | null (workflow passes no `GIT_SHA`) | `~/.local/state/backup-pull/<APP_NAME>/status.json` once `wt/111-backup` lands |
+| health-web | `~/health-web` | `main` | health.example.com | `GET /api/version` behind guard; service tokens limited to `SERVICE_PATHS`, which exclude it (`healthapp/access.py`) | null (audit HW-21) | same pattern, `wt/10006-backup` |
+| investo-bot | `~/investo-bot` | `master` | investobot.example.com | `GET /api/version` behind guard (`web/app.py`) | null | n/a; daemon writes a heartbeat `status.json` and can push `HEARTBEAT_PUSH_URL` (`runtime/daemon.py`) |
+| invoicing | `~/invoicing` | `main` | invoicing.example.com | none: Streamlit, version only in the sidebar (`wiki/ops-deploy.md`) | n/a | same pattern, `wt/63-backup` |
+| events-app | `~/events-app` | `main` | events.example.com | none; `/healthz` on the Access listener is loopback-only (403 from outside, `web.py` `_access_gate`) | n/a | same pattern, `wt/67-backup` |
 | spam-calls | `~/spam-calls` | `main` | unverified (not found in docs) | `GET /api/version`, applicant-auth class | null | unverified |
 | week-leader (decree) | `~/week-leader` | `main` | not deployed (audit WL-02) | public `GET /api/version` | n/a | none |
 
@@ -103,7 +103,7 @@ Statuses: `ok`, `info`, `warn`, `crit`, `unknown` (the monitor could not judge: 
   -  **Input:** host and port of `health.url` (or `tls.host`), connect via the validated IP (section 9.1).  
   -  **Rule:** full verification with the system trust store and hostname check; pass = days to `notAfter` > `tls.warn_days` (21).  
   -  **Severity:** < 21 days `warn`, < 7 days `crit`, verification failure `crit`.  
-  -  **Honest note:** Cloudflare renews edge certificates for `*.dftm.cloud` itself, so on his fleet this mainly catches edge misconfiguration. It earns its place for other users and for non-Cloudflare hosts.  
+  -  **Honest note:** Cloudflare renews edge certificates for `*.example.com` itself, so on his fleet this mainly catches edge misconfiguration. It earns its place for other users and for non-Cloudflare hosts.  
 
 ### 4.7 `HEARTBEAT` -- jobs that should have run
 
@@ -238,8 +238,8 @@ apps:
     branch: master
     repo: ~/skills-n-bills
     version_file: app/jobs/VERSION
-    health: {url: https://jobs.dftm.cloud/healthz, expect_json: {ok: true}}
-    version: {url: https://jobs.dftm.cloud/api/version, auth: access}
+    health: {url: https://jobs.example.com/healthz, expect_json: {ok: true}}
+    version: {url: https://jobs.example.com/api/version, auth: access}
     backup: {status_file: ~/.local/state/backup-pull/jobs/status.json, app_name: jobs}
 
   - name: health-web
@@ -247,8 +247,8 @@ apps:
     branch: main
     repo: ~/health-web
     version_file: healthapp/VERSION
-    health: {url: https://health.dftm.cloud/healthz}
-    version: {url: https://health.dftm.cloud/api/version, auth: access}
+    health: {url: https://health.example.com/healthz}
+    version: {url: https://health.example.com/api/version, auth: access}
     backup: {status_file: ~/.local/state/backup-pull/health-web/status.json, app_name: health-web}
 
   - name: investo-bot
@@ -256,21 +256,21 @@ apps:
     branch: master
     repo: ~/investo-bot
     version_file: web/VERSION
-    health: {url: https://investobot.dftm.cloud/healthz}
-    version: {url: https://investobot.dftm.cloud/api/version, auth: access}
+    health: {url: https://investobot.example.com/healthz}
+    version: {url: https://investobot.example.com/api/version, auth: access}
 
   - name: invoicing                      # no version route: liveness, unpushed and backup only
     github: dftm/invoicing
     branch: main
     repo: ~/invoicing
-    health: {url: https://invoicing.dftm.cloud/healthz}     # path unverified: see open-questions Q4
+    health: {url: https://invoicing.example.com/healthz}     # path unverified: see open-questions Q4
     backup: {status_file: ~/.local/state/backup-pull/invoicing/status.json, app_name: invoicing}
 
   - name: events-app                     # no version route; /healthz is loopback-only on the Access listener
     github: dftm/events-app
     branch: main
     repo: ~/events-app
-    health: {url: http://100.100.40.10:8780/healthz, allow_private: true}   # tailnet break-glass listener
+    health: {url: http://100.64.0.10:8780/healthz, allow_private: true}   # tailnet break-glass listener
     backup: {status_file: ~/.local/state/backup-pull/events-app/status.json, app_name: events-app}
 ```
 

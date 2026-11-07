@@ -24,41 +24,41 @@ defaults:
 
 apps:
   - name: jobs
-    github: dftm/skills-n-bills
+    github: your-org/skills-n-bills
     branch: master
     repo: ~/skills-n-bills
     version_file: app/jobs/VERSION
-    health: {url: https://jobs.dftm.cloud/healthz, expect_json: {ok: true}}
-    version: {url: https://jobs.dftm.cloud/api/version, auth: access}
+    health: {url: https://jobs.example.com/healthz, expect_json: {ok: true}}
+    version: {url: https://jobs.example.com/api/version, auth: access}
     backup: {status_file: ~/.local/state/backup-pull/jobs/status.json, app_name: jobs}
 
   - name: health-web
-    github: dftm/health-web
+    github: your-org/health-web
     branch: main
     repo: ~/health-web
     version_file: healthapp/VERSION
-    health: {url: https://health.dftm.cloud/healthz}
-    version: {url: https://health.dftm.cloud/api/version, auth: access}
+    health: {url: https://health.example.com/healthz}
+    version: {url: https://health.example.com/api/version, auth: access}
     backup: {status_file: ~/.local/state/backup-pull/health-web/status.json, app_name: health-web}
 
   - name: investo-bot
-    github: dftm/investo-bot
+    github: your-org/investo-bot
     branch: master
     repo: ~/investo-bot
     version_file: web/VERSION
-    health: {url: https://investobot.dftm.cloud/healthz}
-    version: {url: https://investobot.dftm.cloud/api/version, auth: access}
+    health: {url: https://investobot.example.com/healthz}
+    version: {url: https://investobot.example.com/api/version, auth: access}
 
   - name: invoicing                      # no version route: liveness, unpushed and backup only
-    github: dftm/invoicing
+    github: your-org/invoicing
     branch: main
     repo: ~/invoicing
-    health: {url: https://invoicing.dftm.cloud/healthz}     # path unverified: see open-questions Q4
+    health: {url: https://invoicing.example.com/healthz}     # path unverified: see open-questions Q4
     backup: {status_file: ~/.local/state/backup-pull/invoicing/status.json, app_name: invoicing}
 
   - name: events-app                     # no version route; /healthz is loopback-only on the Access listener
-    github: dftm/events-app
+    github: your-org/events-app
     branch: main
     repo: ~/events-app
-    health: {url: http://100.100.40.10:8780/healthz, allow_private: true}   # tailnet break-glass listener
+    health: {url: http://100.64.0.10:8780/healthz, allow_private: true}   # tailnet break-glass listener
     backup: {status_file: ~/.local/state/backup-pull/events-app/status.json, app_name: events-app}

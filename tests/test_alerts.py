@@ -885,16 +885,16 @@ def test_offline_cap_restarts_after_the_network_comes_back(tmp_path):
 
 
 def test_reference_urls_must_be_independent_of_the_fleet():
-    base = {"apps": [{"name": "a", "health": {"url": "https://jobs.dftm.cloud/healthz"},
-                      "version": {"url": "https://api.dftm.cloud/v"}}]}
+    base = {"apps": [{"name": "a", "health": {"url": "https://jobs.example.com/healthz"},
+                      "version": {"url": "https://api.example.com/v"}}]}
     ok = config.parse({**base, "reference_urls": ["https://example.org/"]})
     assert ok.reference_urls
-    for bad in ("https://jobs.dftm.cloud/", "https://status.dftm.cloud/", "https://dftm.cloud/", "https://API.DFTM.CLOUD./x"):
+    for bad in ("https://jobs.example.com/", "https://status.example.com/", "https://example.com/", "https://API.EXAMPLE.COM./x"):
         with pytest.raises(config.ConfigError) as e:
             config.parse({**base, "reference_urls": [bad]})
         assert "independent of the fleet" in e.value.errors[0], bad
     with pytest.raises(config.ConfigError):
-        config.parse({"apps": [{"name": "a", "tls": {"host": "x.dftm.cloud:8443"}}], "reference_urls": ["https://y.dftm.cloud/"]})
+        config.parse({"apps": [{"name": "a", "tls": {"host": "x.example.com:8443"}}], "reference_urls": ["https://y.example.com/"]})
     assert config.parse({**base, "offline_suppress_cycles": 0}).offline_suppress_cycles == 0
     with pytest.raises(config.ConfigError):
         config.parse({**base, "offline_suppress_cycles": -1})
