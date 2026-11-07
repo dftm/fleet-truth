@@ -11,7 +11,7 @@ import pytest
 from fleet_truth import config
 from fleet_truth.checks import files as F
 
-LIB = Path("/home/dftms/worktrees/events-app/wt-67-backup/deploy/backup/backup_lib.py")
+LIB = Path("/home/USER/worktrees/events-app/wt-67-backup/deploy/backup/backup_lib.py")
 NOW = 1_790_000_000.0
 
 

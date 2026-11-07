@@ -6,12 +6,12 @@
 
 A solo developer runs 5 to 20 small apps on one or two VPSes, deployed by hand or by a thin CI step. Uptime monitors answer "does the URL return 200?". The failures that actually hurt this fleet were all invisible to that question:
 
-  -  **jobs.example.com, 2026-09-20.** A commit from another machine (`cca46b3`, fail-closed Access guard) rode along in a local build. Every path returned 503 for minutes; `/healthz` answered 200 throughout because that commit exempts it on purpose. Source: [feedback_check_git_log_before_deploying.md](/home/dftms/.claude/projects/-home-dftms/memory/feedback_check_git_log_before_deploying.md).  
-  -  **events-app, 2026-10-22.** The live Sources/Leads feature ran from 4 commits that existed only on the laptop (`git log origin/main..HEAD`: 5636828, fb79b3d, 71ec2c0, bce4129). A disk loss would have lost the code of a running feature. Source: [audit/events-app.md](/home/dftms/worktrees/maintenance-run-20261031/audit/events-app.md) EV header.  
-  -  **events-app public 404.** The tailnet container was recreated, the Access-facing `app-access` container was not, so two containers served two different images ([audit EV-01](/home/dftms/worktrees/maintenance-run-20261031/audit/events-app.md)).  
-  -  **investo-bot** sat with 34 unpushed commits ([repo-sync-check.py](/home/dftms/claude-self/scripts/repo-sync-check.py) docstring).  
+  -  **jobs.example.com, 2026-09-20.** A commit from another machine (`cca46b3`, fail-closed Access guard) rode along in a local build. Every path returned 503 for minutes; `/healthz` answered 200 throughout because that commit exempts it on purpose. Source: [feedback_check_git_log_before_deploying.md](/home/USER/.claude/projects/-home-USER/memory/feedback_check_git_log_before_deploying.md).  
+  -  **events-app, 2026-10-22.** The live Sources/Leads feature ran from 4 commits that existed only on the laptop (`git log origin/main..HEAD`: 5636828, fb79b3d, 71ec2c0, bce4129). A disk loss would have lost the code of a running feature. Source: [audit/events-app.md](/home/USER/worktrees/maintenance-run-20261031/audit/events-app.md) EV header.  
+  -  **events-app public 404.** The tailnet container was recreated, the Access-facing `app-access` container was not, so two containers served two different images ([audit EV-01](/home/USER/worktrees/maintenance-run-20261031/audit/events-app.md)).  
+  -  **investo-bot** sat with 34 unpushed commits ([repo-sync-check.py](/home/USER/claude-self/scripts/repo-sync-check.py) docstring).  
   -  **invoicing, today (2026-11-01):** local `main` is 2 commits ahead of `origin/main` (measured with the spike, read-only).  
-  -  Backups exist as code in four apps but none has run live yet; nothing alerts on their age ([HANDOVER-20261101.md](/home/dftms/worktrees/HANDOVER-20261101.md) "Backups" item [9]). Every audit lists "no monitoring beyond `/healthz`" (JB-03, EV-06, SC-09, HW-23).  
+  -  Backups exist as code in four apps but none has run live yet; nothing alerts on their age ([HANDOVER-20261101.md](/home/USER/worktrees/HANDOVER-20261101.md) "Backups" item [9]). Every audit lists "no monitoring beyond `/healthz`" (JB-03, EV-06, SC-09, HW-23).  
 
 Fleet Truth treats **"what runs is not what git says"** as an outage, next to the usual liveness, backup, certificate and heartbeat checks, on one page with one alert stream.
 
@@ -110,7 +110,7 @@ Statuses: `ok`, `info`, `warn`, `crit`, `unknown` (the monitor could not judge: 
   -  **Input:** `heartbeat.file` (local JSON) with `heartbeat.field` (epoch or ISO-8601 key, dotted path) or `heartbeat.url` (JSON over the same probe path), `heartbeat.max_age_minutes`.  
   -  **Rule:** pass = timestamp present and younger than max age. Unparseable or missing = `unknown`.  
   -  **Severity:** `crit`.  
-  -  Covers investo-bot's daemon `status.json` and `~/.claude/state/jobs.json` from [job-heartbeat.py](/home/dftms/claude-self/scripts/job-heartbeat.py). It does not replace healthchecks.io for cron jobs; it reads files that already exist.  
+  -  Covers investo-bot's daemon `status.json` and `~/.claude/state/jobs.json` from [job-heartbeat.py](/home/USER/claude-self/scripts/job-heartbeat.py). It does not replace healthchecks.io for cron jobs; it reads files that already exist.  
 
 ### 4.8 `STALE_BUILD`
 

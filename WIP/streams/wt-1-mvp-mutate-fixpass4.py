@@ -1,5 +1,5 @@
 import os, shutil, subprocess, sys, time, json
-SRC = "/home/dftms/worktrees/fleet-truth/wt-1-mvp"
+SRC = "/home/USER/worktrees/fleet-truth/wt-1-mvp"
 DST = os.path.join(os.environ["TMPDIR"], "mut", "repo")
 if os.path.exists(DST):
     shutil.rmtree(DST)

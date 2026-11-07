@@ -2,7 +2,7 @@
 
 This repo is self-contained: open it and you have the context. Three layers (LLM-wiki pattern):
 
-  -  **Raw sources** -- the code, tests, [spike/](spike/), and the read-only evidence it was designed from (his other repos, the 2026-10-31 audits under `/home/dftms/worktrees/maintenance-run-20261031/audit/`). Never edited from here.  
+  -  **Raw sources** -- the code, tests, [spike/](spike/), and the read-only evidence it was designed from (his other repos, the 2026-10-31 audits under `/home/USER/worktrees/maintenance-run-20261031/audit/`). Never edited from here.  
   -  **Wiki** -- [wiki/index.md](wiki/index.md) is the entry point; one page per concept; [wiki/log.md](wiki/log.md) is append-only history. The agent maintains it.  
   -  **Schema** -- this file: how to work here.  
 

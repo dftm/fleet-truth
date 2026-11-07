@@ -22,7 +22,7 @@ Nothing found that compares a running app's commit with its git remote **and** w
 | Retool Deployment Dashboard | Shows the commit deployed from a source-control main branch | Same idea | Retool apps only | [docs](https://docs.retool.com/docs/manage-source-control-deployments) (search result) |
 | Better Stack, Cronitor, Cronping, UptimeRobot | Hosted uptime + heartbeat monitoring | `HEALTHZ`, `TLS_EXPIRY`, heartbeats | No git drift (unverified for each; none advertises it) | [Better Stack vs Healthchecks.io](https://betterstack.com/community/comparisons/better-stack-vs-healthchecks-io/), [cronping comparison](https://cronping.com/blog/cronping-vs-healthchecks-vs-cronitor) (competitor-published) |
 | DIY pattern | "Put the SHA in the health endpoint, cron a compare against origin/main" | Exactly the core of `DRIFT` | Everyone re-writes it; nobody handles short SHAs, missing commits, grace windows, unpushed work and stale fetches | [Helpthread issue #176](https://github.com/Helpthread/helpthread/issues/176) (search result) |
-| His own scripts | [repo-sync-check.py](/home/dftms/claude-self/scripts/repo-sync-check.py) (unpushed/dirty repos), [job-heartbeat.py](/home/dftms/claude-self/scripts/job-heartbeat.py) (stale jobs, Telegram), `backup_pull.py --check-status` | `UNPUSHED`, `HEARTBEAT`, `BACKUP_AGE` | Three outputs, no production view, no single page | local |
+| His own scripts | [repo-sync-check.py](/home/USER/claude-self/scripts/repo-sync-check.py) (unpushed/dirty repos), [job-heartbeat.py](/home/USER/claude-self/scripts/job-heartbeat.py) (stale jobs, Telegram), `backup_pull.py --check-status` | `UNPUSHED`, `HEARTBEAT`, `BACKUP_AGE` | Three outputs, no production view, no single page | local |
 
 ## Why not just Uptime Kuma plus a script?
 

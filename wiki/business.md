@@ -1,6 +1,6 @@
 # Pricing and packaging (honest version)
 
-Premises: Demetri works at Bitwarden, so nothing here may become a secrets-management or password product, and the employment contract question from [NEW-APP-IDEAS-20261101.md](/home/dftms/worktrees/NEW-APP-IDEAS-20261101.md) (`20261101-193850-Q2`) is open: nothing ships publicly until it is answered. Fleet Truth holds two read-only tokens to do its job; it does not store, share or manage anyone's secrets, and its docs should say so plainly.
+Premises: Demetri works at Bitwarden, so nothing here may become a secrets-management or password product, and the employment contract question from [NEW-APP-IDEAS-20261101.md](/home/USER/worktrees/NEW-APP-IDEAS-20261101.md) (`20261101-193850-Q2`) is open: nothing ships publicly until it is answered. Fleet Truth holds two read-only tokens to do its job; it does not store, share or manage anyone's secrets, and its docs should say so plainly.
 
 ## What it is worth
 

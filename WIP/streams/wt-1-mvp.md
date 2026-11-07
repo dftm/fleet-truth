@@ -1,6 +1,6 @@
 # Stream report: wt/1-mvp (cards [1]-[7])
 
-Builder: one agent. Branch `wt/1-mvp`, worktree `/home/dftms/worktrees/fleet-truth/wt-1-mvp`, off `main` at ca46b59. Nothing pushed, no board edited, no `gh`, no ssh, no docker. All tests use fake servers on 127.0.0.x, temp git repos and temp status files; no real repo, URL or token was touched; no real Telegram, healthchecks or email message was sent.
+Builder: one agent. Branch `wt/1-mvp`, worktree `/home/USER/worktrees/fleet-truth/wt-1-mvp`, off `main` at ca46b59. Nothing pushed, no board edited, no `gh`, no ssh, no docker. All tests use fake servers on 127.0.0.x, temp git repos and temp status files; no real repo, URL or token was touched; no real Telegram, healthchecks or email message was sent.
 
 ## Totals
 
@@ -49,7 +49,7 @@ Builder: one agent. Branch `wt/1-mvp`, worktree `/home/dftms/worktrees/fleet-tru
 
 ### Card [5] File checks
 
-  [1]  fixtures for `NEVER_RAN`, `WRONG_APP`, `FAILED`, `STALE`, ok (plus edge and missing epoch) agree with the library's `_check_status` on ok/not-ok; the library was imported from `/home/dftms/worktrees/events-app/wt-67-backup/deploy/backup/backup_lib.py` with bytecode writing off (it ran, it was not skipped): `test_same_ok_not_ok_as_backup_lib_check_status`, `test_backup_age_verdicts`.  
+  [1]  fixtures for `NEVER_RAN`, `WRONG_APP`, `FAILED`, `STALE`, ok (plus edge and missing epoch) agree with the library's `_check_status` on ok/not-ok; the library was imported from `/home/USER/worktrees/events-app/wt-67-backup/deploy/backup/backup_lib.py` with bytecode writing off (it ran, it was not skipped): `test_same_ok_not_ok_as_backup_lib_check_status`, `test_backup_age_verdicts`.  
   [2]  held `flock(LOCK_EX)` on `lock` gives `RUNNING` / info; ok status is not masked; `WRONG_APP` is not masked; nothing is created in the state dir (not even `lock`, not even the dir): `test_held_lock_yields_running_and_nothing_is_created`, `test_check_never_creates_lock_or_any_file`.  
   [3]  date-only `builtAt` gives `unknown`; STALE_BUILD never exceeds `info`: `test_stale_build_date_only_is_unknown_never_alert`, `test_stale_build_age_rules`.  
   -  HEARTBEAT: epoch, ISO with offset and `Z`, stale crit, ten unknown cases.  
@@ -104,7 +104,7 @@ Twelve smaller decisions (config keys for email/webhook/ntfy, exit code 4, corre
 
 ## Owner steps
 
-  [1]  Review the branch: `git -C /home/dftms/fleet-truth log wt/1-mvp`; spawn the separate adversarial reviewer per card (the cards require it) with the card text plus the diff.  
+  [1]  Review the branch: `git -C /home/USER/fleet-truth log wt/1-mvp`; spawn the separate adversarial reviewer per card (the cards require it) with the card text plus the diff.  
   [2]  Answer Q1-Q6 ([open-questions.md](../../wiki/open-questions.md)); Q3 gates card [7]'s real `[TEST]`, Q4 gates the invoicing liveness URL.  
   [3]  Land `wt/1-mvp` on `main` yourself (the stream fence forbids the builder from doing it).  
   [4]  Before card [8]: create the healthchecks.io check (period 5 min, grace 15 min), the fine-grained GitHub token (Contents read-only), choose the alert channel, put the values in `~/.config/fleet-truth/env` (0600), write `fleet.yaml` from `fleet.example.yaml`, then run `fleet-truth check-config fleet.yaml` and `fleet-truth test-alert` yourself.  
